@@ -209,6 +209,54 @@
   }
   #status.my-turn { background: rgba(255,213,74,.9); color: #333; font-weight: 700; }
 
+  /* ---- avatars ---- */
+  .avatar {
+    width: 42px; height: 42px; flex: 0 0 auto;
+    border-radius: 50%; overflow: hidden;
+    background: radial-gradient(circle at 50% 30%, rgba(255,255,255,.16), rgba(0,0,0,.32));
+    box-shadow: 0 1px 4px rgba(0,0,0,.45), inset 0 0 0 1.5px rgba(255,255,255,.18);
+  }
+  .avatar.big { width: 56px; height: 56px; }
+  .avatar-svg { width: 100%; height: 100%; display: block; }
+  /* the arm swings up when this seat plays a card */
+  .av-arm { transform-box: fill-box; transform-origin: 50% 100%; }
+  .avatar-svg.swing .av-arm { animation: armswing .55s cubic-bezier(.34,1.56,.64,1) 1; }
+  @keyframes armswing {
+    0%   { transform: rotate(0deg); }
+    35%  { transform: rotate(-42deg) translateY(-2px); }
+    70%  { transform: rotate(-52deg) translateY(-3px); }
+    100% { transform: rotate(0deg); }
+  }
+  /* cigar/cigarette smoke drifting up */
+  .av-smoke { animation: avsmoke 2.6s ease-out infinite; transform-box: fill-box; transform-origin: 50% 100%; }
+  @keyframes avsmoke {
+    0%   { transform: translate(0, 0) scale(.5); opacity: .55; }
+    100% { transform: translate(3px, -14px) scale(1.5); opacity: 0; }
+  }
+  .avatar.turn { box-shadow: 0 0 0 2px #ffd54a, 0 0 12px rgba(255,213,74,.7); }
+  .seat-head { display: flex; align-items: center; gap: 7px; }
+  .seat-head .zone-label { position: static; }
+
+  /* ---- dressing room ---- */
+  #av-preview { display: flex; justify-content: center; }
+  #av-preview .avatar { width: 118px; height: 118px; }
+  #av-slots { display: flex; flex-direction: column; gap: 6px; width: 250px; }
+  .av-slot { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+  .av-slot .name {
+    flex: 1; text-align: center; font-size: .85rem;
+    background: rgba(0,0,0,.28); border-radius: 8px; padding: 4px 6px;
+  }
+  .av-slot .tag { font-size: .68rem; opacity: .6; width: 44px; text-transform: uppercase; letter-spacing: 1px; }
+  .av-slot button { padding: 3px 10px; font-size: .9rem; }
+  .avatar.away { filter: grayscale(1) brightness(.75); }
+  @media (prefers-reduced-motion: reduce) {
+    .avatar-svg.swing .av-arm, .av-smoke { animation: none; }
+  }
+  @media (max-width: 900px) {
+    .avatar { width: 32px; height: 32px; }
+    .avatar.big { width: 40px; height: 40px; }
+  }
+
   /* ---- spectating: no seat, no controls, more room for the table ---- */
   body.spectating #player-zone,
   body.spectating #emote-bar { display: none !important; }
@@ -642,7 +690,7 @@
   <div class="zone" id="player-zone">
     <div class="row" id="player-table"></div>
     <div class="row" id="hand-row"></div>
-    <span class="zone-label" id="my-label">Your hand</span>
+    <div class="seat-head" id="my-head"><span class="zone-label" id="my-label">Your hand</span></div>
   </div>
 
   <div id="controls">
@@ -676,6 +724,7 @@
       <button id="watch-btn" class="secondary" title="Watch a game in progress">👁 Watch</button>
     </div>
     <button id="howto-btn" class="secondary" style="width:220px">How to play</button>
+    <button id="dressup-btn" class="secondary" style="width:220px">🎩 Your look</button>
     <div id="err"></div>
     <button id="link-watch-btn" class="secondary" style="display:none">👁 Watch instead</button>
     <div class="legal-links">
@@ -710,7 +759,18 @@
   </div>
 </div>
 
-<span id="version-tag">v1.9.1</span>
+<span id="version-tag">v1.10.0</span>
+
+<!-- avatar dressing room -->
+<div id="dressup" class="overlay">
+  <div class="panel">
+    <h2>YOUR LOOK</h2>
+    <div id="av-preview"></div>
+    <div id="av-slots"></div>
+    <div class="menu-hint">Everything's free while we're experimenting. Your look follows you into every game.</div>
+    <div class="close-row"><button id="dressup-close-btn">Done</button></div>
+  </div>
+</div>
 
 <!-- rules -->
 <div id="rules" class="overlay">
@@ -912,6 +972,111 @@ function cardSVG(card) {
           letter-spacing="1.5" font-weight="bold">${art.caption}</text>
   </svg>`;
 }
+/* ============ Avatars ============
+ * A little bust per seat: skin tone, face shape, and item slots for a hat,
+ * something in the mouth and something in the hand. Expressions are driven by
+ * the fx events the server already sends, and the arm swings when its owner
+ * plays. Slot counts must match AVATAR_SLOTS on the server. */
+const AV = {
+  skin: ["#f0c9a3", "#e0a878", "#c68642", "#8d5524", "#5b3a1e", "#c9d6e0"],
+  skinName: ["Fair", "Tan", "Olive", "Brown", "Deep", "Undead"],
+  faceName: ["Round", "Long", "Square", "Slim", "Wide"],
+  hatName: ["No hat", "Cap", "Top hat", "Crown", "Beanie", "Cowboy", "Halo"],
+  mouthName: ["Nothing", "Cigar", "Cigarette", "Toothpick"],
+  handName: ["Nothing", "Beer", "Cocktail", "Coffee", "Cash"],
+};
+/* head geometry per face shape: [rx, ry] */
+const FACE_SHAPE = [[15, 14.5], [13.5, 16.5], [15.5, 15], [12.5, 15], [16.5, 13.5]];
+
+function avatarHat(i, skin) {
+  switch (i) {
+    case 1: return `<path d="M22 25 q15 -12 30 0 z" fill="#c0392b"/><path d="M50 25 q9 1 10 4 l-11 1 z" fill="#a5281c"/>`;
+    case 2: return `<rect x="26" y="6" width="22" height="16" rx="2" fill="#1c1c22"/><rect x="19" y="21" width="36" height="4" rx="2" fill="#1c1c22"/><rect x="26" y="17" width="22" height="4" fill="#8e2f45"/>`;
+    case 3: return `<path d="M24 24 L27 10 L32 17 L37 8 L42 17 L47 10 L50 24 z" fill="#f2c200" stroke="#c99a00" stroke-width="1"/><circle cx="37" cy="12" r="2" fill="#e2445c"/>`;
+    case 4: return `<path d="M23 25 q14 -14 28 0 z" fill="#2e7d64"/><rect x="22" y="23" width="30" height="5" rx="2.5" fill="#3f9e80"/><circle cx="37" cy="15" r="3.5" fill="#f2f2f2"/>`;
+    case 5: return `<path d="M17 25 q20 -8 40 0 q-6 3 -20 3 q-14 0 -20 -3 z" fill="#8d6e3a"/><path d="M25 24 q12 -15 24 0 z" fill="#a5814a"/>`;
+    case 6: return `<ellipse cx="37" cy="7" rx="11" ry="3.2" fill="none" stroke="#ffe27a" stroke-width="2.6"/>`;
+    default: return "";
+  }
+}
+function avatarMouthItem(i) {
+  switch (i) {
+    case 1: return `<g><rect x="41" y="48.5" width="16" height="4.5" rx="1.6" fill="#6b4423"/><rect x="55" y="48.5" width="4" height="4.5" rx="1.2" fill="#e06c2b"/><circle class="av-smoke" cx="60" cy="47.5" r="2.6" fill="#ffffff" fill-opacity=".5"/></g>`;
+    case 2: return `<g><rect x="41" y="49.5" width="14" height="2.8" rx="1" fill="#f7f4ea"/><rect x="53" y="49.5" width="3" height="2.8" rx="1" fill="#e06c2b"/><circle class="av-smoke" cx="58" cy="48.5" r="2.2" fill="#ffffff" fill-opacity=".45"/></g>`;
+    case 3: return `<rect x="41" y="49.5" width="12" height="1.8" rx=".9" fill="#d8b56b"/>`;
+    default: return "";
+  }
+}
+function avatarHandItem(i) {
+  switch (i) {
+    case 1: return `<g><rect x="-5" y="-13" width="10" height="13" rx="1.6" fill="#f0a92b"/><rect x="-5" y="-13" width="10" height="4" rx="1.6" fill="#fff6d8"/><rect x="-5.5" y="-14.5" width="11" height="2.5" rx="1" fill="#e8e8e8"/></g>`;
+    case 2: return `<g><path d="M-6 -14 L6 -14 L0.5 -5 L-0.5 -5 z" fill="#ff5c8a" fill-opacity=".85"/><rect x="-1" y="-5.5" width="2" height="5" fill="#dcdcdc"/><circle cx="4" cy="-15" r="2.2" fill="#7ed957"/></g>`;
+    case 3: return `<g><rect x="-5" y="-11" width="10" height="11" rx="1.6" fill="#f4f4f4"/><path d="M5 -9 q5 2 0 6" fill="none" stroke="#f4f4f4" stroke-width="2"/><rect x="-4" y="-11" width="8" height="2.5" fill="#6b4423"/></g>`;
+    case 4: return `<g><rect x="-7" y="-11" width="14" height="9" rx="1.4" fill="#4e9a63" transform="rotate(-8)"/><circle cx="0" cy="-6.5" r="2.6" fill="#dff5e4" transform="rotate(-8)"/></g>`;
+    default: return "";
+  }
+}
+/* eyes + mouth per mood */
+function avatarFeatures(expr, ink) {
+  const eye = (cx, r = 2.2) => `<circle cx="${cx}" cy="41" r="${r}" fill="${ink}"/>`;
+  const brow = (x, y, dx, dy) => `<line x1="${x}" y1="${y}" x2="${x + dx}" y2="${y + dy}" stroke="${ink}" stroke-width="1.8" stroke-linecap="round"/>`;
+  switch (expr) {
+    case "happy":  return `<path d="M27 39 q3.5 -4 7 0" fill="none" stroke="${ink}" stroke-width="1.9" stroke-linecap="round"/>
+                           <path d="M40 39 q3.5 -4 7 0" fill="none" stroke="${ink}" stroke-width="1.9" stroke-linecap="round"/>
+                           <path d="M29 48 q8 7 16 0" fill="none" stroke="${ink}" stroke-width="2" stroke-linecap="round"/>`;
+    case "smug":   return `${eye(30, 1.9)}${eye(44, 1.9)}${brow(26, 35, 7, -2.5)}
+                           <path d="M30 49 q7 5 14 -2" fill="none" stroke="${ink}" stroke-width="2" stroke-linecap="round"/>`;
+    case "shock":  return `<circle cx="30" cy="41" r="3.4" fill="#fff" stroke="${ink}" stroke-width="1.4"/><circle cx="30" cy="41" r="1.5" fill="${ink}"/>
+                           <circle cx="44" cy="41" r="3.4" fill="#fff" stroke="${ink}" stroke-width="1.4"/><circle cx="44" cy="41" r="1.5" fill="${ink}"/>
+                           <ellipse cx="37" cy="50" rx="4" ry="4.6" fill="${ink}"/>`;
+    case "sad":    return `${eye(30)}${eye(44)}${brow(26, 33, 7, 3)}${brow(48, 33, -7, 3)}
+                           <path d="M30 52 q7 -6 14 0" fill="none" stroke="${ink}" stroke-width="2" stroke-linecap="round"/>`;
+    case "think":  return `<circle cx="31" cy="39.5" r="2.2" fill="${ink}"/><circle cx="45" cy="39.5" r="2.2" fill="${ink}"/>
+                           ${brow(26, 34, 7, -1.5)}
+                           <path d="M31 50 q6 2 12 -1" fill="none" stroke="${ink}" stroke-width="1.9" stroke-linecap="round"/>`;
+    case "dead":   return `<g stroke="${ink}" stroke-width="2" stroke-linecap="round">
+                             <line x1="27" y1="38" x2="33" y2="44"/><line x1="33" y1="38" x2="27" y2="44"/>
+                             <line x1="41" y1="38" x2="47" y2="44"/><line x1="47" y1="38" x2="41" y2="44"/></g>
+                           <path d="M31 51 q6 -4 12 0" fill="none" stroke="${ink}" stroke-width="2" stroke-linecap="round"/>`;
+    default:       return `${eye(30)}${eye(44)}
+                           <path d="M31 50 q6 3 12 0" fill="none" stroke="${ink}" stroke-width="1.9" stroke-linecap="round"/>`;
+  }
+}
+
+function avatarSVG(av, opts = {}) {
+  const a = av || { skin: 0, face: 0, hat: 0, mouth: 0, hand: 0 };
+  const expr = opts.expr || "idle";
+  const skin = AV.skin[a.skin % AV.skin.length];
+  const [rx, ry] = FACE_SHAPE[a.face % FACE_SHAPE.length];
+  const ink = a.skin === 5 ? "#2a2f3a" : "#33261c";       // undead needs darker ink
+  const shirt = ["#3f6fd8", "#c0392b", "#2e7d64", "#8e44ad", "#d98324", "#455a64"][a.skin % 6];
+  return `
+  <svg class="avatar-svg ${opts.arm ? "swing" : ""}" viewBox="0 0 74 74" xmlns="http://www.w3.org/2000/svg">
+    <!-- shoulders -->
+    <path d="M12 74 q4 -16 25 -16 q21 0 25 16 z" fill="${shirt}"/>
+    <path d="M30 60 q7 5 14 0 l0 -6 l-14 0 z" fill="${skin}"/>
+    <!-- arm: pivots at the shoulder when this seat plays -->
+    <g class="av-arm" transform="translate(58 64)">
+      <rect x="-4" y="-16" width="8" height="18" rx="4" fill="${shirt}"/>
+      <circle cx="0" cy="-15" r="4.6" fill="${skin}"/>
+      ${avatarHandItem(a.hand)}
+    </g>
+    <!-- head -->
+    <ellipse cx="37" cy="42" rx="${rx}" ry="${ry}" fill="${skin}"/>
+    <ellipse cx="37" cy="42" rx="${rx}" ry="${ry}" fill="none" stroke="rgba(0,0,0,.18)" stroke-width="1"/>
+    ${avatarFeatures(expr, ink)}
+    ${avatarMouthItem(a.mouth)}
+    <!-- hats are drawn for a 15×14.5 head, so shift to sit on this one -->
+    <g transform="translate(0 ${(42 - ry - 25 + 4.5).toFixed(1)})">${avatarHat(a.hat, skin)}</g>
+  </svg>`;
+}
+function avatarEl(av, opts) {
+  const d = document.createElement("div");
+  d.className = "avatar" + (opts && opts.big ? " big" : "");
+  d.innerHTML = avatarSVG(av, opts);
+  return d;
+}
+
 function cardBackSVG() {
   return `
   <svg viewBox="0 0 74 104" xmlns="http://www.w3.org/2000/svg">
@@ -1433,10 +1598,13 @@ function playRevealSequence(rv) {
     if (rv.ok) {
       sfx.ding();
       toast(fill(pick(LINES.safe), { who: rv.who }), "good");
+      setMood(rv.whoId, "happy", 2000);
     } else {
       sfx.trombone();
       shake(true);
       toast(fill(pick(LINES.bust), { who: rv.who }), "bad", true);
+      setMood(rv.whoId, "dead", 3200);
+      setMoodOthers(rv.whoId, "happy", 2400);
     }
   }, 1700);
 
@@ -1446,23 +1614,65 @@ function playRevealSequence(rv) {
   }, REVEAL_MS - 150);
 }
 
+/* ============ Avatar reactions ============
+ * Expressions are transient: a mood is stamped on a seat with an expiry, and
+ * render() draws whatever is current. No new server messages — this rides the
+ * fx events that already exist. */
+const seatMood = new Map();     // playerId -> {expr, until, arm}
+let moodTimer = null;
+
+function setMood(id, expr, ms = 2200, arm = false) {
+  if (id == null) return;
+  seatMood.set(id, { expr, until: Date.now() + ms, arm });
+  if (!moodTimer) moodTimer = setInterval(sweepMoods, 400);
+  render();
+}
+/* everyone except the actor — for reactions to someone else's move */
+function setMoodOthers(exceptId, expr, ms = 1800) {
+  if (!view) return;
+  for (const p of view.players) if (p.id !== exceptId) {
+    seatMood.set(p.id, { expr, until: Date.now() + ms, arm: false });
+  }
+  if (!moodTimer) moodTimer = setInterval(sweepMoods, 400);
+  render();
+}
+function sweepMoods() {
+  const now = Date.now();
+  let changed = false;
+  for (const [id, m] of seatMood) if (m.until <= now) { seatMood.delete(id); changed = true; }
+  if (!seatMood.size && moodTimer) { clearInterval(moodTimer); moodTimer = null; }
+  if (changed) render();
+}
+/* falls back to a thinking face for whoever is on turn */
+function moodFor(p) {
+  const m = seatMood.get(p.id);
+  if (m && m.until > Date.now()) return m;
+  if (view.phase === "over") return { expr: "idle", arm: false };
+  if (view.turnId === p.id && !view.frozen) return { expr: "think", arm: false };
+  return { expr: "idle", arm: false };
+}
+
 /* ---- fx dispatcher ---- */
 function onFx(msg) {
   switch (msg.kind) {
     case "play":
       pendingFly = { whoId: msg.whoId, cards: msg.cards };
+      setMood(msg.whoId, "happy", 1400, true);          // arm swings as it lands
       break;
     case "pickup": {
       sfx.slurp();
       const big = msg.n >= 10;
       toast(fill(pick(big ? LINES.bigPickup : LINES.pickup), msg), "bad", big);
       if (big) { shake(false); banner(msg.n + " cards!", "cool"); }
+      setMood(msg.whoId, big ? "dead" : "sad", big ? 3000 : 2200);
+      if (big) setMoodOthers(msg.whoId, "happy", 2200);  // everyone else enjoys it
       break;
     }
     case "burn": {
       const c = centerOf(pileRect());
       sfx.explosion();
       shake(true);
+      if (msg.whoId != null) { setMood(msg.whoId, "smug", 2600); setMoodOthers(msg.whoId, "shock", 2000); }
       burstAt(c.x, c.y, { count: msg.overdose ? 40 : 26, spread: msg.overdose ? 340 : 240 });
       banner(msg.overdose ? "Overdose!" : "Burned!");
       toast(fill(pick(msg.overdose ? LINES.overdose : LINES.ten), msg), "good", !!msg.overdose);
@@ -1472,9 +1682,11 @@ function onFx(msg) {
       sfx.reverse();
       banner("Reverse!", "cool");
       toast(fill(pick(LINES.reverse), msg), "", false);
+      setMoodOthers(msg.whoId, "shock", 1600);
       break;
     case "seven":
       toast(LINES.seven[0]);
+      setMood(msg.whoId, "smug", 1800);
       break;
     // these land as the played card touches down (see flyCards timing)
     case "reset":
@@ -1542,6 +1754,8 @@ function connect() {
         document.getElementById("overlay-title").textContent =
           iWon ? "🎉 You win!" : `🏆 ${msg.winner} wins!`;
         banner(iWon ? "You win!" : msg.winner + " wins!", "win");
+        setMood(msg.winnerId, "happy", 12000);
+        setMoodOthers(msg.winnerId, "sad", 12000);
         toast(fill(pick(LINES.win), { who: msg.winner }), iWon ? "good" : "", true);
         if (iWon) {
           sfx.fanfare();
@@ -1585,14 +1799,14 @@ function myName() {
 function createRoom() {
   const name = document.getElementById("name-input").value.trim();
   if (!name) return document.getElementById("err").textContent = "Enter a name first.";
-  ws.send(JSON.stringify({ t: "create", name, opts: optVals }));
+  ws.send(JSON.stringify({ t: "create", name, opts: optVals, avatar: myAvatar }));
 }
 function joinRoom() {
   const name = document.getElementById("name-input").value.trim();
   const code = linkCode || document.getElementById("code-input").value.trim().toUpperCase();
   if (!name) return document.getElementById("err").textContent = "Enter a name first.";
   if (code.length !== 4) return document.getElementById("err").textContent = "Codes are 4 characters.";
-  ws.send(JSON.stringify({ t: "join", name, code }));
+  ws.send(JSON.stringify({ t: "join", name, code, avatar: myAvatar }));
 }
 /* Watching needs a code but not really a name — it's only used in chat. */
 function watchRoom() {
@@ -1658,6 +1872,64 @@ function updateDealHint() {
 
 function toggleRules(show) {
   document.getElementById("rules").classList.toggle("show", show);
+}
+
+/* ============ Dressing room ============ */
+const AV_SLOTS = [
+  { key: "skin",  tag: "Skin",  names: AV.skinName },
+  { key: "face",  tag: "Face",  names: AV.faceName },
+  { key: "hat",   tag: "Hat",   names: AV.hatName },
+  { key: "mouth", tag: "Mouth", names: AV.mouthName },
+  { key: "hand",  tag: "Hand",  names: AV.handName },
+];
+let myAvatar = loadAvatar();
+function loadAvatar() {
+  try {
+    const saved = JSON.parse(localStorage.getItem("drugsAvatar") || "null");
+    if (saved) return { skin: saved.skin | 0, face: saved.face | 0, hat: saved.hat | 0, mouth: saved.mouth | 0, hand: saved.hand | 0 };
+  } catch { /* fall through to a random one */ }
+  const pick = n => Math.floor(Math.random() * n);
+  return { skin: pick(AV.skin.length), face: pick(FACE_SHAPE.length), hat: pick(AV.hatName.length), mouth: 0, hand: pick(AV.handName.length) };
+}
+function saveAvatar() {
+  localStorage.setItem("drugsAvatar", JSON.stringify(myAvatar));
+  if (ws && ws.readyState === 1 && view) ws.send(JSON.stringify({ t: "avatar", avatar: myAvatar }));
+}
+function stepAvatar(key, dir) {
+  const slot = AV_SLOTS.find(s => s.key === key);
+  const n = slot.names.length;
+  myAvatar[key] = ((myAvatar[key] + dir) % n + n) % n;
+  saveAvatar();
+  renderDressup();
+  sfx.pop();
+}
+function renderDressup() {
+  const prev = document.getElementById("av-preview");
+  prev.innerHTML = "";
+  // cycles a few expressions so you can see the reactions you'll be making
+  const demo = ["idle", "happy", "smug", "shock", "sad"][Math.floor(Date.now() / 1400) % 5];
+  prev.appendChild(avatarEl(myAvatar, { expr: demo }));
+
+  const box = document.getElementById("av-slots");
+  box.innerHTML = "";
+  for (const s of AV_SLOTS) {
+    const row = document.createElement("div");
+    row.className = "av-slot";
+    row.innerHTML = `<span class="tag">${s.tag}</span>
+      <button class="secondary" data-av="${s.key}" data-dir="-1">◀</button>
+      <span class="name">${s.names[myAvatar[s.key] % s.names.length]}</span>
+      <button class="secondary" data-av="${s.key}" data-dir="1">▶</button>`;
+    box.appendChild(row);
+  }
+  for (const b of box.querySelectorAll("[data-av]")) {
+    b.onclick = () => stepAvatar(b.dataset.av, parseInt(b.dataset.dir, 10));
+  }
+}
+let dressupTimer = null;
+function toggleDressup(show) {
+  document.getElementById("dressup").classList.toggle("show", show);
+  clearInterval(dressupTimer);
+  if (show) { renderDressup(); dressupTimer = setInterval(renderDressup, 1400); }
 }
 
 /* ============ Chat ============ */
@@ -1742,8 +2014,9 @@ function onState() {
     list.innerHTML = "";
     for (const p of view.players.filter(p => !p.bot)) {
       const d = document.createElement("div");
-      d.className = "entry";
-      d.textContent = p.name + (p.id === view.hostId ? " (host)" : "");
+      d.className = "entry seat-head";
+      d.appendChild(avatarEl(p.avatar, { expr: "idle" }));
+      d.appendChild(document.createTextNode(p.name + (p.id === view.hostId ? " (host)" : "")));
       list.appendChild(d);
     }
     optVals.bots = view.opts.bots; optVals.decks = view.opts.decks; optVals.burn = view.opts.burn;
@@ -1891,6 +2164,15 @@ function render() {
     panel.id = "seat-" + p.id;          // anchor for flying cards + emote bubbles
     if (view.turnId === p.id) panel.classList.add("active-turn");
     if (!p.connected && !p.bot) panel.classList.add("disconnected");
+
+    const head = document.createElement("div");
+    head.className = "seat-head";
+    const mood = moodFor(p);
+    const av = avatarEl(p.avatar, { expr: mood.expr, arm: mood.arm });
+    if (view.turnId === p.id) av.classList.add("turn");
+    if (!p.connected && !p.bot) av.classList.add("away");
+    head.appendChild(av);
+
     const label = document.createElement("span");
     label.className = "zone-label";
     label.innerHTML = "";
@@ -1899,7 +2181,8 @@ function render() {
     badge.className = "count-badge";
     badge.textContent = p.handCount;
     label.appendChild(badge);
-    panel.appendChild(label);
+    head.appendChild(label);
+    panel.appendChild(head);
 
     const handRow = document.createElement("div");
     handRow.className = "row opp-hand-row";
@@ -1997,6 +2280,16 @@ function render() {
     hr.appendChild(el);
   });
   document.getElementById("my-label").textContent = `${m.name} (you)`;
+  // your own avatar, sitting with your hand
+  const myHead = document.getElementById("my-head");
+  const oldAv = myHead.querySelector(".avatar");
+  if (oldAv) oldAv.remove();
+  if (!spectating && m.id != null) {
+    const mood = moodFor(m);
+    const av = avatarEl(m.avatar, { expr: mood.expr, arm: mood.arm, big: true });
+    if (view.turnId === m.id) av.classList.add("turn");
+    myHead.insertBefore(av, myHead.firstChild);
+  }
 
   // buttons
   const canAct = myTurn();
@@ -2050,6 +2343,8 @@ document.getElementById("create-btn").onclick = createRoom;
 document.getElementById("join-btn").onclick = joinRoom;
 document.getElementById("watch-btn").onclick = watchRoom;
 document.getElementById("howto-btn").onclick = () => toggleRules(true);
+document.getElementById("dressup-btn").onclick = () => toggleDressup(true);
+document.getElementById("dressup-close-btn").onclick = () => toggleDressup(false);
 document.getElementById("rules-close-btn").onclick = () => toggleRules(false);
 document.getElementById("help-btn").onclick = () => toggleRules(true);
 document.getElementById("sound-btn").onclick = toggleSound;

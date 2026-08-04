@@ -19,6 +19,22 @@
 - [x] Graceful drain: running games finish before the container updates
 - [x] Your-turn browser notification + flashing tab title for tabbed-away players
 
+## Avatars (experiment shipped v1.10.0)
+
+Busts per seat with skin/face/hat/mouth/hand slots, expressions driven by the
+existing `fx` events, and an arm that swings when you play. Everything is free
+and validated server-side by bounds check.
+
+Where it goes next, roughly in order of value per hour of work:
+
+- more items per slot (the slots are data-driven, so each new one is artwork only)
+- item rarity / sets, and a "random look" button
+- reaction polish: sweat drops when one card from losing, zzz when away
+- avatars in the reveal stage and on the win overlay
+- unlock framework: `unlocked(player, item)` server-side, everything granted to
+  everyone — the only change needed if items are ever sold (see ROADMAP money notes)
+- seat layout closer to a real table (arc of seats) rather than stacked panels
+
 ## Next up 🚧
 
 - [ ] Port the v1.3.0 presentation layer to the solo `index.html` (currently multiplayer-only)

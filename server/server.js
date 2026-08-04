@@ -454,7 +454,7 @@ function resolvePlay(room, cards, actor) {
   }
   if (reversed) {
     logMsg(room, "Jack — play order reversed!");
-    fx(room, "reverse", { who: actor ? actor.name : "Someone" });
+    fx(room, "reverse", { who: actor ? actor.name : "Someone", whoId: actor ? actor.id : null });
   }
 
   let burned = cards[0].rank === 10;
@@ -486,10 +486,11 @@ function resolvePlay(room, cards, actor) {
   }
   room.sevenActive = (eff === 7);
   const who = actor ? actor.name : "Someone";
-  if (room.sevenActive) fx(room, "seven", { who });
+  const whoId = actor ? actor.id : null;      // lets the client aim avatar reactions
+  if (room.sevenActive) fx(room, "seven", { who, whoId });
   const topRank = room.pile[room.pile.length - 1].rank;
-  if (topRank === 2) fx(room, "reset", { who });
-  else if (topRank === 3) fx(room, "mirror", { who, mirrors: eff });
+  if (topRank === 2) fx(room, "reset", { who, whoId });
+  else if (topRank === 3) fx(room, "mirror", { who, whoId, mirrors: eff });
   return { burned: false, goAgain: false };
 }
 
@@ -532,7 +533,7 @@ function makeCode() {
   return code;
 }
 
-function makeRoom(hostWs, hostName, opts) {
+function makeRoom(hostWs, hostName, opts, avatar) {
   const room = {
     code: makeCode(),
     phase: "lobby",           // lobby | playing | over
@@ -551,7 +552,7 @@ function makeRoom(hostWs, hostName, opts) {
     gameStartedAt: null,
   };
   rooms.set(room.code, room);
-  addHuman(room, hostWs, hostName);
+  addHuman(room, hostWs, hostName, avatar);
   return room;
 }
 
@@ -610,6 +611,26 @@ function reviveRoom(room) {
   room.abandonedAt = null;
 }
 
+/* ================= Avatars =================
+ * Cosmetic only — the server just validates and relays the choice so everyone
+ * sees the same table. Counts must match the client's catalogue; the client
+ * owns the artwork, this owns what's legal. Everything is free for now: when
+ * items become purchasable, the only change here is an ownership check in
+ * sanitizeAvatar instead of a bounds check. */
+const AVATAR_SLOTS = { skin: 6, face: 5, hat: 7, mouth: 4, hand: 5 };
+function sanitizeAvatar(a) {
+  const out = {};
+  for (const [slot, n] of Object.entries(AVATAR_SLOTS)) {
+    const v = a && Number.isInteger(a[slot]) ? a[slot] : 0;
+    out[slot] = ((v % n) + n) % n;      // wrap rather than reject
+  }
+  return out;
+}
+function randomAvatar() {
+  const pick = n => Math.floor(Math.random() * n);
+  return { skin: pick(6), face: pick(5), hat: pick(7), mouth: pick(4), hand: pick(5) };
+}
+
 function sanitizeOpts(o) {
   const clamp = (v, lo, hi, d) => Number.isInteger(v) ? Math.min(hi, Math.max(lo, v)) : d;
   return {
@@ -619,8 +640,8 @@ function sanitizeOpts(o) {
   };
 }
 
-function addHuman(room, ws, name) {
-  const p = { id: nextPlayerId++, name: name.slice(0, 16) || "Player", ws, bot: false, connected: true, ip: ws && ws._ip || null, hand: [], faceUp: [], faceDown: [] };
+function addHuman(room, ws, name, avatar) {
+  const p = { id: nextPlayerId++, name: name.slice(0, 16) || "Player", ws, bot: false, connected: true, ip: ws && ws._ip || null, avatar: sanitizeAvatar(avatar), hand: [], faceUp: [], faceDown: [] };
   room.players.push(p);
   ws._room = room;
   ws._player = p;
@@ -670,6 +691,7 @@ function viewFor(room, me) {
     busy: room.busy,
     players: room.players.map(p => ({
       id: p.id, name: p.name, bot: p.bot, connected: p.connected,
+      avatar: p.avatar || null,
       handCount: p.hand.length,
       faceUp: p.faceUp,
       faceDownCount: p.faceDown.length,
@@ -703,7 +725,7 @@ function startGame(room) {
   // remove old bots, add per current opts
   room.players = room.players.filter(p => !p.bot);
   for (let i = 1; i <= room.opts.bots; i++)
-    room.players.push({ id: nextPlayerId++, name: "Bot " + i, ws: null, bot: true, connected: true, hand: [], faceUp: [], faceDown: [] });
+    room.players.push({ id: nextPlayerId++, name: "Bot " + i, ws: null, bot: true, connected: true, avatar: randomAvatar(), hand: [], faceUp: [], faceDown: [] });
 
   // Every player needs 9 cards, so a big table needs more than one deck —
   // otherwise the last seats get dealt nothing at all.
@@ -897,7 +919,7 @@ function handle(ws, msg) {
     case "create": {
       if (room) return;
       if (draining) return send(ws, { t: "error", msg: "Server is about to update — try again in a few minutes." });
-      const r = makeRoom(ws, String(msg.name || "Player"), msg.opts);
+      const r = makeRoom(ws, String(msg.name || "Player"), msg.opts, msg.avatar);
       send(ws, { t: "joined", code: r.code });
       pushState(r);
       return;
@@ -917,6 +939,7 @@ function handle(ws, msg) {
         if (seat) {
           reviveRoom(r);
           seat.connected = true; seat.ws = ws; seat.ip = ws._ip || seat.ip;
+          if (msg.avatar) seat.avatar = sanitizeAvatar(msg.avatar);
           ws._room = r; ws._player = seat;
           send(ws, { t: "joined", code: r.code, rejoined: true });
           logMsg(r, `${seat.name} is back — taking their seat from the bot.`);
@@ -929,7 +952,7 @@ function handle(ws, msg) {
         return send(ws, { t: "error", msg: "That game is already in progress — you can watch it instead.", inProgress: true });
       }
       if (r.players.filter(p => !p.bot).length >= 6) return send(ws, { t: "error", msg: "Room full (6 players max)." });
-      const p = addHuman(r, ws, wanted);
+      const p = addHuman(r, ws, wanted, msg.avatar);
       send(ws, { t: "joined", code: r.code });
       logMsg(r, `${p.name} joined the room.`);
       pushState(r);
@@ -972,6 +995,12 @@ function handle(ws, msg) {
       if (draining) return send(ws, { t: "error", msg: "Server is about to update — new games can't start right now." });
       if (room.phase === "playing") return;
       startGame(room);
+      return;
+    }
+    case "avatar": {
+      // Changing your look mid-hand is harmless, so it's allowed any time.
+      me.avatar = sanitizeAvatar(msg.avatar);
+      pushState(room);
       return;
     }
     case "chat": {
