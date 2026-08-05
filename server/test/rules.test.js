@@ -14,7 +14,16 @@ function room(pile, opts = {}) {
     opts: Object.assign({ bots: 0, decks: 1, burn: 4 }, opts),
   };
 }
-const actor = (name = "P1") => ({ id: 1, name, bot: false, connected: true, hand: [], faceUp: [], faceDown: [] });
+let nextId = 1;
+const actor = (name = "P1") => ({ id: nextId++, name, bot: false, connected: true, hand: [], faceUp: [], faceDown: [] });
+/* A room with real seats, for the chaos effects that move cards between players. */
+function table(pile, seats, opts = {}) {
+  const r = room(pile, opts);
+  r.players = seats;
+  return r;
+}
+const JK = () => ({ rank: R.JOKER, suit: "★" });
+const effect = key => R.JOKER_EFFECTS.find(e => e.key === key);
 
 let pass = 0, fail = 0;
 function test(name, fn) {
@@ -177,6 +186,150 @@ test("a deck has 52 distinct cards per copy", () => {
   for (const c of R.makeDeck(2)) counts[c.rank + c.suit] = (counts[c.rank + c.suit] || 0) + 1;
   assert.strictEqual(Object.keys(counts).length, 52);
   assert.ok(Object.values(counts).every(n => n === 2), "two decks means two of every card");
+});
+
+console.log("\nChaos mode — jokers");
+test("a Joker is playable on anything, even under a 7", () => {
+  const r = room([C(14)]);
+  assert.strictEqual(R.canPlayRank(r, R.JOKER), true, "on an ace");
+  r.sevenActive = true;
+  assert.strictEqual(R.canPlayRank(r, R.JOKER), true, "under a 7 cap");
+});
+test("a Joker on top leaves the pile wide open", () => {
+  const r = table([], [actor("P1"), actor("P2")]);
+  R.resolvePlay(r, [JK()], r.players[0]);
+  assert.strictEqual(R.canPlayRank(r, 2), true);
+  assert.strictEqual(R.canPlayRank(r, 4), true, "a low card is legal on a Joker");
+  assert.strictEqual(R.canPlayRank(r, 14), true);
+});
+test("a Joker clears an active 7 cap", () => {
+  const r = table([C(5)], [actor("P1"), actor("P2")]);
+  r.sevenActive = true;
+  R.resolvePlay(r, [JK()], r.players[0]);
+  assert.strictEqual(r.sevenActive, false);
+  assert.strictEqual(R.canPlayRank(r, 13), true, "a king is legal again");
+});
+test("four Jokers still overdose the pile", () => {
+  const r = table([JK(), JK(), JK()], [actor("P1"), actor("P2")]);
+  assert.strictEqual(R.resolvePlay(r, [JK()], r.players[0]).burned, true);
+  assert.strictEqual(r.pile.length, 0);
+});
+
+console.log("\nChaos mode — effects");
+test("swap trades hands with the next seat", () => {
+  const a = actor("A"), b = actor("B");
+  a.hand = [C(4), C(5)];
+  b.hand = [C(9), C(10), C(11)];
+  const r = table([], [a, b]);
+  effect("swap").run(r, a);
+  assert.strictEqual(a.hand.length, 3, "A got B's three cards");
+  assert.strictEqual(b.hand.length, 2, "B got A's two cards");
+  assert.strictEqual(a.hand[0].rank, 9);
+});
+test("swap follows the play direction", () => {
+  const a = actor("A"), b = actor("B"), c = actor("C");
+  a.hand = [C(4)]; b.hand = [C(9)]; c.hand = [C(13)];
+  const r = table([], [a, b, c]);
+  r.direction = -1;
+  effect("swap").run(r, a);          // reversed: the seat before A
+  assert.strictEqual(a.hand[0].rank, 13, "swapped with C, not B");
+  assert.strictEqual(c.hand[0].rank, 4);
+});
+test("rotate passes every hand one seat along", () => {
+  const a = actor("A"), b = actor("B"), c = actor("C");
+  a.hand = [C(4)]; b.hand = [C(9)]; c.hand = [C(13)];
+  const r = table([], [a, b, c]);
+  effect("rotate").run(r, a);
+  assert.strictEqual(a.hand[0].rank, 13, "A receives from C");
+  assert.strictEqual(b.hand[0].rank, 4, "B receives from A");
+  assert.strictEqual(c.hand[0].rank, 9, "C receives from B");
+});
+test("rotate keeps every card in play", () => {
+  const seats = [actor("A"), actor("B"), actor("C")];
+  seats[0].hand = [C(4), C(5)]; seats[1].hand = []; seats[2].hand = [C(13)];
+  const r = table([], seats);
+  effect("rotate").run(r, seats[0]);
+  assert.strictEqual(seats.reduce((n, p) => n + p.hand.length, 0), 3);
+});
+test("skip sets the flag that advanceTurn consumes", () => {
+  const a = actor("A"), b = actor("B");
+  const r = table([], [a, b]);
+  effect("skip").run(r, a);
+  assert.strictEqual(r.skipNext, true);
+});
+test("tax makes everyone else draw, and copes with an empty deck", () => {
+  const a = actor("A"), b = actor("B"), c = actor("C");
+  const r = table([], [a, b, c]);
+  r.deck = [C(7), C(8)];
+  effect("tax").run(r, a);
+  assert.strictEqual(a.hand.length, 0, "the player who rolled it pays nothing");
+  assert.strictEqual(b.hand.length + c.hand.length, 2);
+  const r2 = table([], [a, b]);
+  r2.deck = [];
+  assert.ok(/empty/.test(effect("tax").run(r2, a)), "says so when the deck is dry");
+});
+test("purge dumps everyone's lowest card onto the pile", () => {
+  const a = actor("A"), b = actor("B");
+  a.hand = [C(4), C(9)];
+  b.hand = [C(6), C(13)];
+  const r = table([], [a, b]);
+  effect("purge").run(r, a);
+  assert.strictEqual(a.hand.length, 1); assert.strictEqual(a.hand[0].rank, 9);
+  assert.strictEqual(b.hand.length, 1); assert.strictEqual(b.hand[0].rank, 13);
+  assert.deepStrictEqual(r.pile.map(c => c.rank), [4, 6], "in seat order");
+});
+test("purge skips empty hands without crashing", () => {
+  const a = actor("A"), b = actor("B");
+  a.hand = []; b.hand = [C(6)];
+  const r = table([], [a, b]);
+  effect("purge").run(r, a);
+  assert.deepStrictEqual(r.pile.map(c => c.rank), [6]);
+});
+test("bomb arms the pile", () => {
+  const r = table([], [actor("A"), actor("B")]);
+  effect("bomb").run(r, r.players[0]);
+  assert.strictEqual(r.bombArmed, true);
+});
+
+console.log("\nChaos mode — the time bomb");
+test("playing a plain card on an armed pile eats the whole thing", () => {
+  const a = actor("A"), b = actor("B");
+  const r = table([C(4), C(9)], [a, b]);
+  r.bombArmed = true;
+  const res = R.resolvePlay(r, [C(13)], b);
+  assert.strictEqual(res.burned, false);
+  assert.strictEqual(r.pile.length, 0, "pile cleared into their hand");
+  assert.strictEqual(b.hand.length, 3, "two pile cards plus the one they played");
+  assert.strictEqual(r.bombArmed, false, "and the bomb is spent");
+});
+test("a 2, 3, 10 or Joker defuses it instead", () => {
+  for (const rank of [2, 3, 10, R.JOKER]) {
+    const a = actor("A"), b = actor("B");
+    const r = table([C(4)], [a, b]);
+    r.bombArmed = true;
+    R.resolvePlay(r, [rank === R.JOKER ? JK() : C(rank)], b);
+    assert.strictEqual(b.hand.length, 0, `rank ${rank} should not eat the pile`);
+    assert.strictEqual(r.bombArmed, false, `rank ${rank} disarms it`);
+  }
+});
+test("picking up the pile takes the bomb with it", () => {
+  const a = actor("A");
+  const r = table([C(4), C(9)], [a]);
+  r.bombArmed = true;
+  R.pickUpPile(r, a);
+  assert.strictEqual(r.bombArmed, false);
+});
+
+console.log("\nChaos mode — dealing");
+test("makeDeck still has no jokers in it", () => {
+  assert.strictEqual(R.makeDeck(2).filter(c => c.rank === R.JOKER).length, 0);
+  assert.strictEqual(R.makeDeck(1).length, 52);
+});
+test("shuffle keeps every card", () => {
+  const d = R.makeDeck(1);
+  const before = d.map(c => c.rank + c.suit).sort().join(",");
+  R.shuffle(d);
+  assert.strictEqual(d.map(c => c.rank + c.suit).sort().join(","), before);
 });
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

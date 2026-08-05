@@ -19,6 +19,25 @@
 - [x] Graceful drain: running games finish before the container updates
 - [x] Your-turn browser notification + flashing tab title for tabbed-away players
 
+## Chaos mode 🃏 — shipped v1.12.0
+
+Lobby toggle + 0–8 jokers. Each Joker is playable on anything and rolls ONE
+random effect (several at once still roll once, like Jacks): **swap** hands with
+the next seat, **rotate** every hand one seat, **skip** the next player, **tax**
+(everyone else draws), **purge** (everyone dumps their lowest card on the pile),
+**bomb** (arms the pile — the next player eats it unless they play a 2/3/10/Joker),
+**gift** (choose a card and a recipient; the turn is held until they pick, with a
+25s fallback). Jokers are dealt only after the six table cards, so they can never
+appear face-up or face-down.
+
+Ideas for later:
+
+- item box / roguelike layer: pick a perk between hands in a series
+- effects that persist for a round (an "upside down ranking" joker was designed
+  but cut — needs a very loud on-screen indicator to be fair)
+- weighted rolls, or letting the host choose which effects are in the pool
+- a joker-only "pure chaos" deck for very short games
+
 ## Avatars (experiment shipped v1.10.0)
 
 Busts per seat with skin/face/hat/mouth/hand slots, expressions driven by the
@@ -59,16 +78,6 @@ Still open:
 - [ ] Pickup animation — cards fly from the pile *to* the player who ate them
 - [ ] Deck-back designs per theme
 
-## Chaos mode 🃏 (direction 1, scoped small)
-
-A room toggle, not a roguelike engine — prove the fun first:
-
-- [ ] Jokers in the deck with random Mario-Kart-style effects on play
-      (swap hands with a random player, everyone passes one card left,
-      peek at a face-down card, next player draws two, …)
-- [ ] Effect roulette animation when a joker lands
-- [ ] If it's a hit: consider deeper progression (unlockable effects, bot powers, per-run items)
-
 ## More games 🏗️ (direction 2)
 
 The platform play — rooms/chat/bots/dashboard are already game-agnostic:
@@ -83,8 +92,7 @@ The platform play — rooms/chat/bots/dashboard are already game-agnostic:
 
 - [ ] Smarter bot AI (holds specials, plans face-up plays, difficulty levels)
 - [ ] Player accounts or persistent names + personal stats page
-- [ ] Spectator mode
 - [ ] Game history / replay of the last hand
 - [ ] Configurable house rules per room (strict 7s, J behaviour, hand size)
 - [ ] Game-state persistence across server restarts (refresh and carry on)
-- [ ] Watchtower auto-updates once drain + persistence make it safe
+

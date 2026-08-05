@@ -237,6 +237,21 @@
   .seat-head { display: flex; align-items: center; gap: 7px; }
   .seat-head .zone-label { position: static; }
 
+  /* ---- chaos mode ---- */
+  #gift-cards { gap: 6px; flex-wrap: wrap; justify-content: center; }
+  #gift-cards .card { cursor: pointer; transition: transform .12s ease; }
+  #gift-cards .card:hover { transform: translateY(-6px); }
+  #gift-cards .card.chosen { transform: translateY(-10px); box-shadow: 0 0 0 3px #ffd54a, 0 6px 14px rgba(0,0,0,.5); }
+  #gift-targets { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+  #gift-targets button:disabled { opacity: .4; cursor: not-allowed; }
+  /* an armed pile pulses red until somebody deals with it */
+  @keyframes bombpulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(226,43,16,0); }
+    50% { box-shadow: 0 0 22px 6px rgba(226,43,16,.65); }
+  }
+  #pile-stack.armed { animation: bombpulse 1s ease-in-out infinite; border-radius: 8px; }
+  #effective-note.armed { color: #ff8a70; font-weight: 700; }
+
   /* ---- post-game stats screen ---- */
   #endgame-panel { max-width: 620px; max-height: 88vh; overflow-y: auto; gap: 12px; }
   #end-awards { display: flex; flex-direction: column; gap: 4px; align-items: center; }
@@ -782,7 +797,18 @@
   </div>
 </div>
 
-<span id="version-tag">v1.11.0</span>
+<span id="version-tag">v1.12.0</span>
+
+<!-- chaos: choose a card to give away -->
+<div id="gift" class="overlay">
+  <div class="panel">
+    <h2>🎁 GIVE A CARD AWAY</h2>
+    <div class="menu-hint" id="gift-step">Pick one of your cards…</div>
+    <div class="row" id="gift-cards"></div>
+    <div id="gift-targets"></div>
+    <div class="menu-hint">Take too long and the table decides for you.</div>
+  </div>
+</div>
 
 <!-- avatar dressing room -->
 <div id="dressup" class="overlay">
@@ -820,6 +846,18 @@
     <p class="menu-hint" style="margin-top:2px">Each special has its own face, so you can spot them without remembering the list: the black bomb <b>10</b>, the teal <b>RESET</b> 2, the frosted <b>ANY</b> 3, the amber <b>MAX 7</b>, and the violet <b>REVERSE</b> Jack.</p>
     <h4>Overdose</h4>
     <p>If the configured number of same-rank cards (default 4) pile up in a row on top, the pile overdoses — it's killed like a 10 and the player who completed it goes again. From <b>three</b> of a kind the pile catches fire, and when the flames turn red and start flickering fast you're <b>one card short</b> — the next of that rank kills it.</p>
+    <h4>🃏 Chaos mode</h4>
+    <p>Switch it on in the lobby and Jokers join the deck. A Joker can be played on <b>anything</b>, and leaves the pile wide open for the next player — but you never know what it does until you play it. Each one rolls a random effect:</p>
+    <ul>
+      <li><b>Hand swap</b> — you trade your whole hand with the next player.</li>
+      <li><b>Everyone passes</b> — every hand moves one seat along.</li>
+      <li><b>Skip</b> — the next player loses their turn.</li>
+      <li><b>Everybody pays</b> — every other player draws a card.</li>
+      <li><b>Everyone dumps</b> — every player throws their lowest card onto the pile.</li>
+      <li><b>Time bomb</b> — the pile is armed: the next player eats it unless they play a 2, 3, 10 or Joker.</li>
+      <li><b>Gift</b> — you choose one of your cards and hand it to somebody.</li>
+    </ul>
+    <p>Jokers are <b>never</b> dealt into your face-up or face-down cards — they only reach you in your hand or from the deck. Several played together still roll just one effect.</p>
     <h4>Dropping out and watching</h4>
     <p>Lose your connection and a bot covers your seat — rejoin with the <b>same room code and name</b> (capitalisation doesn't matter) and you get your cards back. If <i>everybody</i> drops, the game pauses instead of ending, and waits a few minutes for someone to return.</p>
     <p>Not playing? Enter a room code and hit <b>👁 Watch</b> to spectate. You'll see the table and can chat, but not the players' hands.</p>
@@ -856,6 +894,21 @@
         </div>
       </div>
       <div class="menu-hint">Overdose: that many of the same rank on the pile kills it, like a 10.</div>
+      <div class="menu-row">
+        <label>🃏 Chaos mode</label>
+        <button id="chaos-btn" class="secondary" style="min-width:70px">Off</button>
+      </div>
+      <div class="menu-row" id="jokers-row" style="display:none">
+        <label>Jokers</label>
+        <div class="stepper">
+          <button data-opt="jokers" data-dir="-1">−</button><span class="val" id="opt-jokers">2</span><button data-opt="jokers" data-dir="1">+</button>
+        </div>
+      </div>
+      <div class="menu-hint" id="chaos-hint" style="display:none">
+        Each Joker rolls a random effect: swap hands, everyone passes, skip a turn,
+        everyone draws, everyone dumps their lowest, a time bomb, or give a card away.
+        Jokers never end up in your face-up or face-down cards.
+      </div>
       <button id="deal-btn" style="font-size:1.05rem; padding:10px 40px;">Deal</button>
     </div>
     <div class="menu-hint" id="lobby-wait" style="display:none">Waiting for the host to start…</div>
@@ -877,7 +930,8 @@
 <script>
 "use strict";
 /* ============ Sprites & helpers (same as solo) ============ */
-const RANK_LABEL = r => ({11:"J",12:"Q",13:"K",14:"A"}[r] || String(r));
+const JOKER = 15;                      // chaos mode
+const RANK_LABEL = r => ({11:"J",12:"Q",13:"K",14:"A",15:"Joker"}[r] || String(r));
 const REVEAL_MS = 2900;   // must match the server's reveal pause
 
 /* ---- special card faces ----
@@ -892,7 +946,34 @@ const SPECIAL_ART = {
   7:  { caption: "MAX 7",   top: "#fff8e8", bot: "#ffe4b2", edge: "#e0982c", ink: "#9a5600" },
   10: { caption: "KILLS",   top: "#262b36", bot: "#0a0c11", edge: "#f0b429", ink: "#ffe08a", dark: true },
   11: { caption: "REVERSE", top: "#f7f1ff", bot: "#dfcbfb", edge: "#9a6ce0", ink: "#57288c" },
+  15: { caption: "CHAOS",   top: "#2b1140", bot: "#0d0417", edge: "#ff5cc8", ink: "#ffd7f4", dark: true, joker: true },
 };
+
+/* the joker: a jester's hat over a wild grin, on the only card in the deck
+ * that doesn't tell you what it's about to do */
+function motifJoker(ink) {
+  return `
+    <linearGradient id="jkflame" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ff5cc8"/><stop offset="50%" stop-color="#9b5cff"/>
+      <stop offset="100%" stop-color="#5ce1ff"/>
+    </linearGradient>
+    <g stroke="url(#jkflame)" stroke-opacity=".5" stroke-width="1.2" stroke-linecap="round">
+      <line x1="12" y1="34" x2="18" y2="34"/><line x1="56" y1="34" x2="62" y2="34"/>
+      <line x1="14" y1="70" x2="20" y2="70"/><line x1="54" y1="70" x2="60" y2="70"/>
+    </g>
+    <!-- three-pointed jester hat with bells -->
+    <path d="M37 40 Q20 40 16 26 Q24 30 28 24 Q31 34 37 34 Q43 34 46 24 Q50 30 58 26 Q54 40 37 40 Z"
+          fill="url(#jkflame)" stroke="${ink}" stroke-width="1" stroke-opacity=".5"/>
+    <circle cx="15" cy="24" r="2.6" fill="#ffe08a"/>
+    <circle cx="59" cy="24" r="2.6" fill="#ffe08a"/>
+    <circle cx="37" cy="31" r="2.2" fill="#ffe08a"/>
+    <!-- grin -->
+    <path d="M25 52 Q37 68 49 52 Q37 58 25 52 Z" fill="${ink}"/>
+    <circle cx="29" cy="45" r="2.4" fill="${ink}"/>
+    <circle cx="45" cy="45" r="2.4" fill="${ink}"/>
+    <text x="37" y="80" font-size="9" fill="${ink}" fill-opacity=".9" text-anchor="middle"
+          letter-spacing="1.5" font-weight="bold" font-family="Georgia,serif">JOKER</text>`;
+}
 
 /* the bomb: fuse, spark and a burst waiting to happen */
 function motifBomb(ink) {
@@ -983,6 +1064,7 @@ function cardSVG(card) {
     : card.rank === 2 ? motifReset(art.ink)
     : card.rank === 7 ? motifCap(art.ink)
     : card.rank === 11 ? motifReverse(art.ink)
+    : card.rank === JOKER ? motifJoker(art.ink)
     : motifGlass(art.ink, card.suit);
   const gid = "cg" + card.rank;
   return `
@@ -993,8 +1075,8 @@ function cardSVG(card) {
     <rect x="1" y="1" width="72" height="102" rx="7" fill="url(#${gid})" stroke="${art.edge}" stroke-width="1.4"/>
     <rect x="4" y="4" width="66" height="96" rx="5" fill="none" stroke="${art.edge}" stroke-opacity=".5" stroke-width="1"/>
     ${motif}
-    <text x="8" y="20" font-size="16" font-weight="bold" fill="${rankInk}" font-family="Georgia,serif">${label}</text>
-    <text x="8" y="35" font-size="13" fill="${suitInk}">${card.suit}</text>
+    <text x="8" y="20" font-size="16" font-weight="bold" fill="${rankInk}" font-family="Georgia,serif">${art.joker ? "★" : label}</text>
+    ${art.joker ? "" : `<text x="8" y="35" font-size="13" fill="${suitInk}">${card.suit}</text>`}
     <text x="37" y="96" font-size="6.4" fill="${art.ink}" fill-opacity=".85" text-anchor="middle"
           letter-spacing="1.5" font-weight="bold">${art.caption}</text>
   </svg>`;
@@ -1725,6 +1807,36 @@ function onFx(msg) {
     case "emote":
       showEmote(msg.whoId, msg.e);
       break;
+    /* ---- chaos mode ---- */
+    case "joker": {
+      const c = centerOf(pileRect());
+      sfx.shimmer();
+      banner("🃏 " + msg.label, "cool");
+      toast(msg.text, "", true);
+      burstAt(c.x, c.y, {
+        count: 26, spread: 200, dur: 1.1,
+        colors: ["#ff5cc8", "#9b5cff", "#5ce1ff", "#ffe08a", "#fff"],
+      });
+      // each effect gets its own noise so you learn them by ear
+      const noise = { swap: "whoosh", rotate: "whoosh", skip: "pop", tax: "deal", purge: "card", bomb: "drumroll", gift: "ding" }[msg.effect];
+      if (noise && sfx[noise]) setTimeout(() => sfx[noise](), 260);
+      setMood(msg.whoId, "smug", 2600);
+      setMoodOthers(msg.whoId, "shock", 2000);
+      break;
+    }
+    case "bombhit":
+      sfx.explosion();
+      shake(true);
+      banner("💣 BOOM", "bad");
+      toast(`${msg.who} sets off the bomb — ${msg.n} cards!`, "bad", true);
+      setMood(msg.whoId, "dead", 3200);
+      setMoodOthers(msg.whoId, "happy", 2400);
+      break;
+    case "gift":
+      sfx.ding();
+      toast(`${msg.who} hands a card to ${msg.to}`, "", false);
+      setMood(msg.toId, "sad", 2000);
+      break;
   }
 }
 
@@ -1735,7 +1847,7 @@ let reveal = null;      // {card, ok, who} currently displayed
 let revealTimer = null;
 let selected = [];
 let spectating = false;
-const optVals = { bots: 0, decks: 1, burn: 4 };
+const optVals = { bots: 0, decks: 1, burn: 4, chaos: false, jokers: 2 };
 const BURN_STEPS = [0,3,4,5,6,7,8];
 
 function connect() {
@@ -1825,6 +1937,51 @@ function myName() {
   return me ? me.name : "";
 }
 
+/* ============ Chaos: the gift picker ============
+ * Shown only to the player the server is waiting on. Two taps: a card, then
+ * who gets it. The server decides for you if you dawdle. */
+let giftChoice = -1;
+function renderGift() {
+  const overlay = document.getElementById("gift");
+  const mine = view && view.giftFrom != null && view.giftFrom === view.youId;
+  overlay.classList.toggle("show", !!mine);
+  if (!mine) { giftChoice = -1; return; }
+
+  const m = me();
+  const zone = view.giftZone === "faceUp" ? "faceUp" : "hand";
+  const src = (zone === "faceUp" ? m.faceUp : m.hand) || [];
+  if (giftChoice >= src.length) giftChoice = -1;
+
+  const row = document.getElementById("gift-cards");
+  row.innerHTML = "";
+  src.forEach((c, i) => {
+    const el = cardEl(c, true);
+    if (i === giftChoice) el.classList.add("chosen");
+    el.onclick = () => { giftChoice = i; sfx.card(); renderGift(); };
+    row.appendChild(el);
+  });
+
+  document.getElementById("gift-step").textContent = giftChoice < 0
+    ? `Pick one of your ${zone === "faceUp" ? "face-up cards" : "cards"}…`
+    : `Giving ${RANK_LABEL(src[giftChoice].rank)}${src[giftChoice].rank === JOKER ? "" : src[giftChoice].suit} — who gets it?`;
+
+  const targets = document.getElementById("gift-targets");
+  targets.innerHTML = "";
+  for (const p of view.players) {
+    if (p.id === view.youId) continue;
+    const b = document.createElement("button");
+    b.className = "secondary";
+    b.textContent = `${p.name}${p.bot ? " 🤖" : ""} (${p.handCount})`;
+    b.disabled = giftChoice < 0;
+    b.onclick = () => {
+      ws.send(JSON.stringify({ t: "gift", idx: giftChoice, targetId: p.id }));
+      giftChoice = -1;
+      document.getElementById("gift").classList.remove("show");
+    };
+    targets.appendChild(b);
+  }
+}
+
 /* ============ Post-game stats screen ============ */
 function endDur(ms) {
   if (ms == null) return "";
@@ -1834,6 +1991,7 @@ function endDur(ms) {
 /* Superlatives: each looks for a strict maximum (ties award nobody) so every
  * line names exactly one player. Order = priority; at most 5 shown. */
 const AWARDS = [
+  { icon: "🃏", title: "Agent of chaos", stat: s => s.jokersPlayed || 0, line: (w, n) => `played ${n} joker${n === 1 ? "" : "s"}` },
   { icon: "🧹", title: "Human vacuum",  stat: s => s.biggestPickup, line: (w, n) => `picked up ${n} cards at once` },
   { icon: "💥", title: "Pyromaniac",    stat: s => s.burns,         line: (w, n) => `killed the pile ${n === 1 ? "once" : n + " times"}` },
   { icon: "🍀", title: "Blind luck",    stat: s => s.blindFail === 0 ? s.blindOk : 0, line: (w, n) => `${n} blind flip${n === 1 ? "" : "s"}, never busted` },
@@ -1966,6 +2124,8 @@ function stepOpt(key, dir) {
     let i = BURN_STEPS.indexOf(optVals.burn) + dir;
     i = Math.min(BURN_STEPS.length - 1, Math.max(0, i));
     optVals.burn = BURN_STEPS[i];
+  } else if (key === "jokers") {
+    optVals.jokers = Math.min(8, Math.max(0, optVals.jokers + dir));
   } else if (key === "decks") {
     const floor = need();
     const wanted = optVals.decks + dir;
@@ -1989,12 +2149,28 @@ function refreshOptLabels() {
   document.getElementById("opt-bots").textContent = optVals.bots;
   document.getElementById("opt-decks").textContent = optVals.decks;
   document.getElementById("opt-burn").textContent = optVals.burn === 0 ? "Off" : optVals.burn;
+  const chaosBtn = document.getElementById("chaos-btn");
+  chaosBtn.textContent = optVals.chaos ? "On 🃏" : "Off";
+  chaosBtn.classList.toggle("off", !optVals.chaos);
+  document.getElementById("jokers-row").style.display = optVals.chaos ? "flex" : "none";
+  document.getElementById("chaos-hint").style.display = optVals.chaos ? "block" : "none";
+  document.getElementById("opt-jokers").textContent = optVals.jokers;
   updateDealHint();
+}
+function toggleChaos() {
+  optVals.chaos = !optVals.chaos;
+  if (optVals.chaos && optVals.jokers === 0) optVals.jokers = 2;
+  refreshOptLabels();
+  if (ws && ws.readyState === 1 && view) ws.send(JSON.stringify({ t: "opts", opts: optVals }));
+  sfx.pop();
+  if (optVals.chaos) toast("Chaos mode on — jokers in the deck", "good");
 }
 
 function updateDealHint() {
   const el = document.getElementById("deal-hint");
-  if (el) el.textContent = `${seatCount() * 9} cards dealt`;
+  if (!el) return;
+  const jk = optVals.chaos && optVals.jokers ? ` + ${optVals.jokers} joker${optVals.jokers === 1 ? "" : "s"}` : "";
+  el.textContent = `${seatCount() * 9} cards dealt${jk}`;
 }
 
 function toggleRules(show) {
@@ -2103,10 +2279,10 @@ document.getElementById("chat-form").addEventListener("submit", e => {
 
 /* ============ Rules helpers (mirror of server, for highlighting only) ============ */
 function canPlayRank(r) {
-  if (r === 2 || r === 3 || r === 10) return true;
+  if (r === 2 || r === 3 || r === 10 || r === JOKER) return true;
   if (view.sevenActive) return r <= 7;
   const top = view.effectiveTop;
-  if (top === null || top === 2) return true;
+  if (top === null || top === 2 || top === JOKER) return true;
   return r >= top;
 }
 /* Spectators have no seat, so stand in an empty one — the renderer then draws
@@ -2147,6 +2323,7 @@ function onState() {
       list.appendChild(d);
     }
     optVals.bots = view.opts.bots; optVals.decks = view.opts.decks; optVals.burn = view.opts.burn;
+    optVals.chaos = !!view.opts.chaos; optVals.jokers = view.opts.jokers != null ? view.opts.jokers : 2;
     refreshOptLabels();
     enforceMinDecks(view.isHost);   // players joining can raise the deck floor
     document.getElementById("host-opts").style.display = view.isHost ? "flex" : "none";
@@ -2157,10 +2334,19 @@ function onState() {
     if (view.phase !== "over") over.classList.remove("show");
     if (view.phase === "playing") updateTurnStatus();
   }
+  renderGift();
   render();
 }
 
 function updateTurnStatus() {
+  // Chaos: the table is waiting on somebody to choose a card to give away.
+  if (view.giftFrom != null) {
+    const giver = view.players.find(p => p.id === view.giftFrom);
+    setStatus(view.giftFrom === view.youId
+      ? "🎁 Choose a card to give away…"
+      : `🎁 ${giver ? giver.name : "Someone"} is choosing a card to give away…`);
+    return;
+  }
   // A frozen game is waiting on somebody to rejoin — nothing will move until then.
   if (view.frozen) {
     setStatus("Paused — everyone has dropped out. The game resumes when a player rejoins with their name.");
@@ -2386,11 +2572,16 @@ function render() {
     }
   }
   prevTopRun = view.topRun;
+  // chaos: an armed pile pulses red and says what saves you
+  ps.classList.toggle("armed", !!view.bombArmed);
   const note = document.getElementById("effective-note");
+  note.classList.toggle("armed", !!view.bombArmed);
   const topCard = view.pileTop[view.pileTop.length - 1];
-  if (reveal && !reveal.ok) note.textContent = "illegal flip!";
+  if (view.bombArmed) note.textContent = "💣 armed — play a 2, 3, 10 or Joker, or eat the pile";
+  else if (reveal && !reveal.ok) note.textContent = "illegal flip!";
   else if (topCard && topCard.rank === 3 && view.effectiveTop !== null) note.textContent = `3 mirrors: counts as ${RANK_LABEL(view.effectiveTop)}`;
   else if (topCard && view.effectiveTop === 2) note.textContent = "reset — anything goes";
+  else if (topCard && view.effectiveTop === JOKER) note.textContent = "joker on top — anything goes";
   else if (topCard && view.effectiveTop === null) note.textContent = "only 3s — anything goes";
   else note.textContent = view.sevenActive ? "7 in effect" : "";
 
@@ -2470,6 +2661,7 @@ document.getElementById("create-btn").onclick = createRoom;
 document.getElementById("join-btn").onclick = joinRoom;
 document.getElementById("watch-btn").onclick = watchRoom;
 document.getElementById("howto-btn").onclick = () => toggleRules(true);
+document.getElementById("chaos-btn").onclick = toggleChaos;
 document.getElementById("dressup-btn").onclick = () => toggleDressup(true);
 document.getElementById("dressup-close-btn").onclick = () => toggleDressup(false);
 document.getElementById("rules-close-btn").onclick = () => toggleRules(false);

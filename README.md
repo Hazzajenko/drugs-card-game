@@ -18,6 +18,14 @@ Be the first to get rid of every card: your hand, then your 3 face-up cards, the
 | **10** | Kills the pile and you go again — play it on anything |
 | **J** | Reverses the play order until the next Jack |
 | **Overdose** | A configurable run of the same rank (default 4) kills the pile |
+| **🃏 Joker** | *Chaos mode only.* Playable on anything, and rolls a random effect |
+
+**Chaos mode** (lobby toggle, 0–8 jokers): each Joker rolls one of — hand swap
+with the next player, everyone passes their hand one seat, skip the next
+player, everybody else draws, everyone dumps their lowest card on the pile, a
+time bomb that makes the next player eat the pile unless they kill it, or give
+a card of your choice to somebody. Jokers are never dealt into the face-up or
+face-down cards, so a blind ending can't be won by luck of the deal.
 
 Unlike standard Palace, the face-up and face-down cards are **dealt randomly** — no choosing, no swapping.
 

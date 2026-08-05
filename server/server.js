@@ -77,6 +77,7 @@ const stats = {
   reversals: 0,          // jacks that flipped the order
   blindFlips: 0,
   blindFails: 0,
+  jokersPlayed: 0,       // chaos mode
   chatMessages: 0,
   wins: {},              // player name -> wins
 };
@@ -389,13 +390,17 @@ const server = http.createServer((req, res) => {
 /* ================= Game rules (same as solo client) ================= */
 const SUITS = ["♠", "♥", "♦", "♣"];
 const RANKS = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14];
-const RANK_LABEL = r => ({ 11: "J", 12: "Q", 13: "K", 14: "A" }[r] || String(r));
-const cardName = c => RANK_LABEL(c.rank) + c.suit;
+const JOKER = 15;                       // chaos mode only; never dealt to the table
+const RANK_LABEL = r => ({ 11: "J", 12: "Q", 13: "K", 14: "A", 15: "Joker" }[r] || String(r));
+const cardName = c => (c.rank === JOKER ? "a Joker" : RANK_LABEL(c.rank) + c.suit);
 
 function makeDeck(nDecks) {
   const d = [];
   for (let n = 0; n < nDecks; n++)
     for (const s of SUITS) for (const r of RANKS) d.push({ rank: r, suit: s });
+  return shuffle(d);
+}
+function shuffle(d) {
   for (let i = d.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [d[i], d[j]] = [d[j], d[i]];
@@ -412,11 +417,172 @@ function effectiveTop(room) {
 }
 
 function canPlayRank(room, r) {
-  if (r === 2 || r === 3 || r === 10) return true;
+  if (r === 2 || r === 3 || r === 10 || r === JOKER) return true;
   const top = effectiveTop(room);
   if (room.sevenActive) return r <= 7;
-  if (top === null || top === 2) return true;
+  // a Joker on top leaves the pile wide open, like a 2
+  if (top === null || top === 2 || top === JOKER) return true;
   return r >= top;
+}
+
+/* ================= Chaos mode =================
+ * A Joker is playable on anything and rolls ONE random effect per play (like
+ * Jacks, several at once still count once). Everything here mutates the room
+ * and logs what happened; the client only renders the fx event. */
+function seatAfter(room, p) {
+  const i = room.players.indexOf(p);
+  const n = room.players.length;
+  return room.players[(i + room.direction + n) % n];
+}
+function lowestIndex(cards) {
+  let best = 0;
+  for (let i = 1; i < cards.length; i++) if (cards[i].rank < cards[best].rank) best = i;
+  return best;
+}
+function cardsLeft(p) { return p.hand.length + p.faceUp.length + p.faceDown.length; }
+
+const JOKER_EFFECTS = [
+  {
+    key: "swap", label: "Hand swap!",
+    run(room, actor) {
+      const other = seatAfter(room, actor);
+      if (other === actor) return `${actor.name} has nobody to swap with.`;
+      const tmp = actor.hand; actor.hand = other.hand; other.hand = tmp;
+      sortHand(actor); sortHand(other);
+      return `${actor.name} swaps hands with ${other.name}! (${other.hand.length} ⇄ ${actor.hand.length} cards)`;
+    },
+  },
+  {
+    key: "rotate", label: "Everyone passes!",
+    run(room, actor) {
+      const ps = room.players;
+      if (ps.length < 2) return "Nobody to pass to.";
+      // every hand moves one seat along the current play direction
+      const hands = ps.map(p => p.hand);
+      const n = ps.length;
+      for (let i = 0; i < n; i++) {
+        const from = ((i - room.direction) % n + n) % n;
+        ps[i].hand = hands[from];
+        sortHand(ps[i]);
+      }
+      return `Everyone passes their hand ${room.direction === 1 ? "left" : "right"}!`;
+    },
+  },
+  {
+    key: "skip", label: "Turn skipped!",
+    run(room, actor) {
+      const victim = seatAfter(room, actor);
+      if (victim === actor) return "Nobody to skip.";
+      room.skipNext = true;
+      return `${victim.name} loses their turn!`;
+    },
+  },
+  {
+    key: "tax", label: "Everybody pays!",
+    run(room, actor) {
+      let n = 0;
+      for (const p of room.players) {
+        if (p === actor || !room.deck.length) continue;
+        p.hand.push(room.deck.pop());
+        sortHand(p);
+        n++;
+      }
+      return n ? `Everyone else draws a card (${n} paid up).` : "The deck is empty — nobody pays.";
+    },
+  },
+  {
+    key: "purge", label: "Everyone dumps!",
+    run(room, actor) {
+      // Joel's one: every player throws their lowest card onto the pile, in
+      // seat order, so the last one thrown is what the next player must beat.
+      const dumped = [];
+      for (const p of room.players) {
+        if (!p.hand.length) continue;
+        const c = p.hand.splice(lowestIndex(p.hand), 1)[0];
+        room.pile.push(c);
+        dumped.push(`${p.name} ${cardName(c)}`);
+      }
+      if (!dumped.length) return "Nobody had a card to dump.";
+      return `Everyone dumps their lowest card — ${dumped.join(", ")}.`;
+    },
+  },
+  {
+    key: "bomb", label: "Time bomb armed!",
+    run(room, actor) {
+      room.bombArmed = true;
+      return `The pile is armed — the next player eats it unless they kill it with a 2, 3, 10 or Joker!`;
+    },
+  },
+  {
+    key: "gift", label: "Gift time!",
+    run(room, actor) {
+      // resolved separately: humans get a picker, bots decide instantly
+      return startGift(room, actor);
+    },
+  },
+];
+
+/* Which effects can fire right now. Solo-against-nobody tables would roll
+ * effects with no victim, so they're filtered out rather than fizzling. */
+function enabledJokerEffects(room) {
+  const needOthers = new Set(["swap", "rotate", "skip", "tax", "gift"]);
+  const alone = room.players.length < 2;
+  return JOKER_EFFECTS.filter(e => !(alone && needOthers.has(e.key)));
+}
+
+/* Gift: the actor gives one card to another player. Bots act at once; humans
+ * get a picker and the turn is held until they choose (or time out). */
+function giftZone(p) {
+  if (p.hand.length) return "hand";
+  if (p.faceUp.length) return "faceUp";
+  return null;
+}
+function startGift(room, actor) {
+  const zone = giftZone(actor);
+  if (!zone) return `${actor.name} has nothing left to give away.`;
+  const others = room.players.filter(p => p !== actor);
+  if (!others.length) return `${actor.name} has nobody to give a card to.`;
+  if (actor.bot || !actor.connected) {
+    // meanest sensible choice: dump the lowest card on whoever is closest to winning
+    const idx = lowestIndex(actor[zone]);
+    const target = others.reduce((a, b) => (cardsLeft(b) < cardsLeft(a) ? b : a));
+    return giveCard(room, actor, zone, idx, target);
+  }
+  room.pendingGift = {
+    id: actor.id, zone,
+    timer: setTimeout(() => autoGift(room), 25000),
+  };
+  return `${actor.name} is choosing a card to give away…`;
+}
+function giveCard(room, from, zone, idx, to) {
+  const card = from[zone].splice(idx, 1)[0];
+  to.hand.push(card);
+  sortHand(to);
+  sortHand(from);
+  fx(room, "gift", { who: from.name, whoId: from.id, toId: to.id, to: to.name });
+  return `${from.name} gives ${cardName(card)} to ${to.name}!`;
+}
+/* Nobody chose in time (or they dropped) — decide for them. */
+function autoGift(room) {
+  const pg = room.pendingGift;
+  if (!pg) return;
+  const actor = room.players.find(p => p.id === pg.id);
+  room.pendingGift = null;
+  if (!actor) return resumeAfterGift(room, null, pg);
+  const zone = giftZone(actor);
+  if (!zone) { logMsg(room, `${actor.name} had nothing to give.`); return resumeAfterGift(room, actor, pg); }
+  const others = room.players.filter(p => p !== actor);
+  if (!others.length) return resumeAfterGift(room, actor, pg);
+  const target = others.reduce((a, b) => (cardsLeft(b) < cardsLeft(a) ? b : a));
+  logMsg(room, "Out of time — " + giveCard(room, actor, zone, lowestIndex(actor[zone]), target));
+  resumeAfterGift(room, actor, pg);
+}
+/* Picks the game back up once the gift is settled. */
+function resumeAfterGift(room, actor, pg) {
+  if (room.phase !== "playing") return;
+  if (actor && hasWon(room, actor)) return endGame(room, actor);
+  if (pg && pg.goAgain) { pushState(room); maybeBotTurn(room); return; }
+  advanceTurn(room);
 }
 
 function activeZone(p) {
@@ -461,6 +627,33 @@ function resolvePlay(room, cards, actor) {
   if (reversed) {
     logMsg(room, "Jack — play order reversed!");
     fx(room, "reverse", { who: actor ? actor.name : "Someone", whoId: actor ? actor.id : null });
+  }
+
+  /* A time bomb goes off before anything else: whoever plays on an armed pile
+   * eats it, unless what they played kills or resets the pile anyway. */
+  if (room.bombArmed) {
+    room.bombArmed = false;
+    const defused = cards.some(c => c.rank === 2 || c.rank === 3 || c.rank === 10 || c.rank === JOKER);
+    if (!defused) {
+      fx(room, "bombhit", { who: actor ? actor.name : "Someone", whoId: actor ? actor.id : null, n: room.pile.length });
+      logMsg(room, `💣 The bomb goes off — ${actor ? actor.name : "someone"} eats the pile!`);
+      if (actor) pickUpPile(room, actor);
+      return { burned: false, goAgain: false };
+    }
+    logMsg(room, `💣 ${actor ? actor.name : "Someone"} defuses the bomb.`);
+  }
+
+  /* Chaos: roll one effect per play, however many Jokers went down. */
+  if (actor && cards.some(c => c.rank === JOKER)) {
+    bump("jokersPlayed");
+    if (gs) gs.jokersPlayed++;
+    const pool = enabledJokerEffects(room);
+    const roll = pool[Math.floor(Math.random() * pool.length)];
+    room.sevenActive = false;                 // a Joker clears a 7 cap like a 2
+    const text = roll.run(room, actor);
+    logMsg(room, `🃏 Joker — ${roll.label} ${text}`);
+    fx(room, "joker", { who: actor.name, whoId: actor.id, effect: roll.key, label: roll.label, text });
+    if (room.pendingGift) room.pendingGift.goAgain = false;
   }
 
   let burned = cards[0].rank === 10;
@@ -525,6 +718,7 @@ function pickUpPile(room, p) {
   p.hand.push(...room.pile);
   room.pile = [];
   room.sevenActive = false;
+  room.bombArmed = false;        // scooping the pile takes the bomb with it
   sortHand(p);
 }
 
@@ -557,6 +751,9 @@ function makeRoom(hostWs, hostName, opts, avatar) {
     turn: 0,
     direction: 1,
     sevenActive: false,
+    skipNext: false,          // chaos: Joker skipped the next seat
+    bombArmed: false,         // chaos: pile is a time bomb
+    pendingGift: null,        // chaos: waiting for someone to choose a gift
     busy: false,              // true during a reveal pause
     timer: null,
     graceTimer: null,         // running while nobody is connected
@@ -579,6 +776,7 @@ function humansConnected(room) {
 function closeRoom(room, reason) {
   clearTimeout(room.timer);
   clearTimeout(room.graceTimer);
+  if (room.pendingGift) { clearTimeout(room.pendingGift.timer); room.pendingGift = null; }
   room.phase = "over";
   rooms.delete(room.code);
   for (const p of room.players) {
@@ -601,6 +799,8 @@ function closeRoom(room, reason) {
  * solo player against bots lost the game the instant their connection blinked.
  * Lobbies aren't worth holding: there is no game state to come back to. */
 function abandonRoom(room) {
+  // settle a half-finished gift first, so the frozen game isn't stuck mid-turn
+  if (room.pendingGift) { clearTimeout(room.pendingGift.timer); autoGift(room); }
   clearTimeout(room.timer);            // stop the bots playing to an empty table
   if (room.phase !== "playing") {
     closeRoom(room, "Everyone left the room.");
@@ -650,6 +850,8 @@ function sanitizeOpts(o) {
     bots: clamp(o && o.bots, 0, 5, 0),
     decks: clamp(o && o.decks, 1, 4, 1),
     burn: [0, 3, 4, 5, 6, 7, 8].includes(o && o.burn) ? o.burn : 4,
+    chaos: !!(o && o.chaos),
+    jokers: clamp(o && o.jokers, 0, 8, 2),
   };
 }
 
@@ -699,6 +901,11 @@ function viewFor(room, me) {
     topRun: topRunCount(room),
     effectiveTop: effectiveTop(room),
     sevenActive: room.sevenActive,
+    bombArmed: !!room.bombArmed,
+    skipNext: !!room.skipNext,
+    // whose turn is being held while they choose a card to give away
+    giftFrom: room.pendingGift ? room.pendingGift.id : null,
+    giftZone: room.pendingGift ? room.pendingGift.zone : null,
     direction: room.direction,
     turnId: room.phase === "playing" ? room.players[room.turn].id : null,
     busy: room.busy,
@@ -750,10 +957,20 @@ function startGame(room) {
   }
   room.deck = makeDeck(room.opts.decks);
 
+  /* Table cards are dealt from a joker-free deck: a Joker among your face-down
+   * cards would be a guaranteed free flip, which spoils the blind ending. The
+   * jokers go in afterwards, so they only ever arrive in a hand or a draw. */
   for (const p of room.players) {
     p.hand = []; p.faceUp = []; p.faceDown = [];
     for (let i = 0; i < 3; i++) p.faceDown.push(room.deck.pop());
     for (let i = 0; i < 3; i++) p.faceUp.push(room.deck.pop());
+  }
+  const jokers = room.opts.chaos ? room.opts.jokers : 0;
+  if (jokers > 0) {
+    for (let i = 0; i < jokers; i++) room.deck.push({ rank: JOKER, suit: "★" });
+    shuffle(room.deck);
+  }
+  for (const p of room.players) {
     for (let i = 0; i < 3; i++) p.hand.push(room.deck.pop());
     sortHand(p);
   }
@@ -763,8 +980,11 @@ function startGame(room) {
   // all-time stats, and thrown away with the room
   room.gs = {};
   for (const p of room.players) {
-    room.gs[p.id] = { played: 0, pickups: 0, pickedUp: 0, biggestPickup: 0, burns: 0, overdoses: 0, jacks: 0, blindOk: 0, blindFail: 0 };
+    room.gs[p.id] = { played: 0, pickups: 0, pickedUp: 0, biggestPickup: 0, burns: 0, overdoses: 0, jacks: 0, jokersPlayed: 0, blindOk: 0, blindFail: 0 };
   }
+  room.skipNext = false;
+  room.bombArmed = false;
+  if (room.pendingGift) { clearTimeout(room.pendingGift.timer); room.pendingGift = null; }
   bump("gamesStarted");
   logMsg(room, `Game started: ${room.players.length} players, ${room.opts.decks} deck(s), Overdose ${room.opts.burn || "off"}. ${room.players[room.turn].name} goes first.`);
   pushState(room);
@@ -774,7 +994,12 @@ function startGame(room) {
 function advanceTurn(room) {
   if (room.phase !== "playing") return;
   const n = room.players.length;
-  room.turn = (room.turn + room.direction + n) % n;
+  let steps = 1;
+  if (room.skipNext) {                       // chaos: a Joker skipped somebody
+    room.skipNext = false;
+    steps = 2;
+  }
+  room.turn = (room.turn + room.direction * steps + n * 2) % n;
   pushState(room);
   maybeBotTurn(room);
 }
@@ -795,6 +1020,12 @@ function maybeBotTurn(room) {
 function finishPlay(room, p, res) {
   drawUp(room, p);
   if (hasWon(room, p)) return endGame(room, p);
+  // a Joker asked them to give a card away: hold here, resumeAfterGift carries on
+  if (room.pendingGift) {
+    room.pendingGift.goAgain = !!res.goAgain;
+    pushState(room);
+    return;
+  }
   if (res.goAgain) {
     pushState(room);
     if (p.bot || !p.connected) {
@@ -880,7 +1111,7 @@ function botMove(room, p) {
     logMsg(room, `${p.name} can't play — picks up the pile.`);
     return advanceTurn(room);
   }
-  const specials = new Set([2, 3, 10]);
+  const specials = new Set([2, 3, 10, JOKER]);   // saved for when nothing else works
   const nonSpecial = legal.filter(i => !specials.has(src[i].rank));
   const choiceRank = nonSpecial.length
     ? Math.min(...nonSpecial.map(i => src[i].rank))
@@ -942,6 +1173,11 @@ wss.on("connection", (ws, req) => {
       if (room.players.filter(q => !q.bot).length === 0) return abandonRoom(room);
     } else {
       logMsg(room, `${p.name} disconnected — a bot takes over. They can rejoin with the same name.`);
+      // don't strand the table waiting on a gift from someone who just left
+      if (room.pendingGift && room.pendingGift.id === p.id) {
+        clearTimeout(room.pendingGift.timer);
+        autoGift(room);
+      }
     }
     // Hold the game instead of destroying it, so they can come back.
     if (humansConnected(room) === 0) return abandonRoom(room);
@@ -1035,6 +1271,21 @@ function handle(ws, msg) {
       startGame(room);
       return;
     }
+    case "gift": {
+      const pg = room.pendingGift;
+      if (!pg || pg.id !== me.id) return;
+      const zone = giftZone(me);
+      const idx = Number.isInteger(msg.idx) ? msg.idx : -1;
+      const target = room.players.find(p => p.id === msg.targetId && p !== me);
+      if (!zone || idx < 0 || idx >= me[zone].length || !target) {
+        return send(ws, { t: "error", msg: "Pick one of your own cards and another player." });
+      }
+      clearTimeout(pg.timer);
+      room.pendingGift = null;
+      logMsg(room, giveCard(room, me, zone, idx, target));
+      resumeAfterGift(room, me, pg);
+      return;
+    }
     case "avatar": {
       // Changing your look mid-hand is harmless, so it's allowed any time.
       me.avatar = sanitizeAvatar(msg.avatar);
@@ -1113,5 +1364,6 @@ if (require.main === module) {
 module.exports = {
   makeDeck, effectiveTop, canPlayRank, resolvePlay, pickUpPile, topRunCount,
   activeZone, legalIndices, drawUp, hasWon, RANK_LABEL, cardName,
+  JOKER, JOKER_EFFECTS, seatAfter, shuffle,
   server,   // so tests can listen on an ephemeral port (see test/share-link.test.js)
 };
