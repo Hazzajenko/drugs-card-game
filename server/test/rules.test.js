@@ -320,6 +320,31 @@ test("picking up the pile takes the bomb with it", () => {
   assert.strictEqual(r.bombArmed, false);
 });
 
+console.log("\nChaos mode — client/server parity");
+{
+  const fs = require("fs");
+  const client = fs.readFileSync(require("path").join(__dirname, "..", "public", "index.html"), "utf8");
+  test("the roulette lists exactly the effects the server can roll", () => {
+    const m = client.match(/const EFFECT_ORDER = \[([^\]]+)\]/);
+    assert.ok(m, "EFFECT_ORDER not found in the client");
+    const clientKeys = m[1].split(",").map(s => s.trim().replace(/['"]/g, "")).filter(Boolean).sort();
+    const serverKeys = R.JOKER_EFFECTS.map(e => e.key).sort();
+    assert.deepStrictEqual(clientKeys, serverKeys,
+      "reel would land on the wrong effect — client " + clientKeys.join("/") + " vs server " + serverKeys.join("/"));
+  });
+  test("every effect has an icon and a name for the reel", () => {
+    for (const e of R.JOKER_EFFECTS) {
+      assert.ok(new RegExp(`\\b${e.key}:\\s*\\{\\s*ic:`).test(client), `no EFFECT_META entry for "${e.key}"`);
+    }
+  });
+  test("the reel item height matches the CSS", () => {
+    const js = client.match(/const SLOT_H = (\d+)/);
+    const css = client.match(/\.slot-item \{\s*height: (\d+)px/);
+    assert.ok(js && css, "could not find SLOT_H or .slot-item height");
+    assert.strictEqual(js[1], css[1], "SLOT_H and .slot-item height must agree or the reel lands off-centre");
+  });
+}
+
 console.log("\nChaos mode — dealing");
 test("makeDeck still has no jokers in it", () => {
   assert.strictEqual(R.makeDeck(2).filter(c => c.rank === R.JOKER).length, 0);

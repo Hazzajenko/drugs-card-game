@@ -237,6 +237,53 @@
   .seat-head { display: flex; align-items: center; gap: 7px; }
   .seat-head .zone-label { position: static; }
 
+  /* ---- chaos: effect roulette ----
+   * A real reel: a tall strip of every effect that spins past a window and
+   * decelerates onto the one the server rolled. --slot-h must match SLOT_H. */
+  #slot {
+    position: fixed; inset: 0; display: none;
+    align-items: center; justify-content: center;
+    z-index: 44; pointer-events: none;
+    background: radial-gradient(ellipse at center, rgba(30,0,40,.55) 0%, rgba(0,0,0,.85) 100%);
+  }
+  #slot.show { display: flex; }
+  .slot-wrap { display: flex; flex-direction: column; align-items: center; gap: 14px; }
+  .slot-title { font-size: .95rem; letter-spacing: 3px; text-transform: uppercase; opacity: .85; }
+  .slot-window {
+    --slot-h: 68px;
+    position: relative; overflow: hidden;
+    width: min(84vw, 400px); height: var(--slot-h);
+    border-radius: 12px;
+    background: linear-gradient(180deg, rgba(43,17,64,.96), rgba(13,4,23,.96));
+    box-shadow: 0 0 0 3px #ff5cc8, 0 0 26px rgba(255,92,200,.55), inset 0 8px 18px rgba(0,0,0,.75), inset 0 -8px 18px rgba(0,0,0,.75);
+  }
+  .slot-reel { position: absolute; left: 0; right: 0; top: 0; will-change: transform; }
+  .slot-item {
+    height: 68px; display: flex; align-items: center; justify-content: center; gap: 10px;
+    font-size: clamp(1rem, 3.4vw, 1.35rem); font-weight: 800; letter-spacing: 2px;
+    color: #ffd7f4; text-transform: uppercase; white-space: nowrap;
+  }
+  .slot-item .ic { font-size: 1.5em; }
+  .slot-line {
+    position: absolute; inset: 0; pointer-events: none;
+    border-radius: 12px;
+    background: linear-gradient(180deg, rgba(0,0,0,.55) 0%, rgba(0,0,0,0) 32%, rgba(0,0,0,0) 68%, rgba(0,0,0,.55) 100%);
+  }
+  .slot-window.landed { animation: slotland .45s ease; }
+  @keyframes slotland {
+    0%   { box-shadow: 0 0 0 3px #fff, 0 0 46px rgba(255,255,255,.9), inset 0 0 0 rgba(0,0,0,0); }
+    100% { box-shadow: 0 0 0 3px #ff5cc8, 0 0 26px rgba(255,92,200,.55), inset 0 8px 18px rgba(0,0,0,.75), inset 0 -8px 18px rgba(0,0,0,.75); }
+  }
+  .slot-result {
+    min-height: 1.6em; max-width: min(88vw, 460px); text-align: center;
+    font-size: .95rem; color: #fff; text-shadow: 0 2px 8px rgba(0,0,0,.8);
+  }
+  .slot-result.show { animation: stampIn .3s ease; }
+  @media (prefers-reduced-motion: reduce) {
+    .slot-reel { transition: none !important; }
+    .slot-window.landed { animation: none; }
+  }
+
   /* ---- chaos mode ---- */
   #gift-cards { gap: 6px; flex-wrap: wrap; justify-content: center; }
   #gift-cards .card { cursor: pointer; transition: transform .12s ease; }
@@ -797,7 +844,19 @@
   </div>
 </div>
 
-<span id="version-tag">v1.12.0</span>
+<!-- chaos: effect roulette -->
+<div id="slot">
+  <div class="slot-wrap">
+    <div class="slot-title">🃏 <span id="slot-who"></span> played a Joker</div>
+    <div class="slot-window">
+      <div class="slot-reel" id="slot-reel"></div>
+      <div class="slot-line"></div>
+    </div>
+    <div class="slot-result" id="slot-result"></div>
+  </div>
+</div>
+
+<span id="version-tag">v1.12.1</span>
 
 <!-- chaos: choose a card to give away -->
 <div id="gift" class="overlay">
@@ -1808,22 +1867,10 @@ function onFx(msg) {
       showEmote(msg.whoId, msg.e);
       break;
     /* ---- chaos mode ---- */
-    case "joker": {
-      const c = centerOf(pileRect());
-      sfx.shimmer();
-      banner("🃏 " + msg.label, "cool");
-      toast(msg.text, "", true);
-      burstAt(c.x, c.y, {
-        count: 26, spread: 200, dur: 1.1,
-        colors: ["#ff5cc8", "#9b5cff", "#5ce1ff", "#ffe08a", "#fff"],
-      });
-      // each effect gets its own noise so you learn them by ear
-      const noise = { swap: "whoosh", rotate: "whoosh", skip: "pop", tax: "deal", purge: "card", bomb: "drumroll", gift: "ding" }[msg.effect];
-      if (noise && sfx[noise]) setTimeout(() => sfx[noise](), 260);
-      setMood(msg.whoId, "smug", 2600);
-      setMoodOthers(msg.whoId, "shock", 2000);
+    // the reel handles the banner, sounds, particles and moods when it lands
+    case "joker":
+      spinJoker(msg);
       break;
-    }
     case "bombhit":
       sfx.explosion();
       shake(true);
@@ -1937,6 +1984,93 @@ function myName() {
   return me ? me.name : "";
 }
 
+/* ============ Chaos: the effect roulette ============
+ * The server has already applied the effect by the time this runs — the reel is
+ * theatre. It does gate the gift picker, so the overlay doesn't pop up over a
+ * spinning reel. */
+const SLOT_H = 68;              // must match .slot-item height in the CSS
+const SLOT_SPIN_MS = 1500;
+const EFFECT_META = {
+  swap:   { ic: "🔄", name: "Hand swap" },
+  rotate: { ic: "➰", name: "Everyone passes" },
+  skip:   { ic: "⛔", name: "Skip a turn" },
+  tax:    { ic: "💸", name: "Everybody pays" },
+  purge:  { ic: "🗑️", name: "Everyone dumps" },
+  bomb:   { ic: "💣", name: "Time bomb" },
+  gift:   { ic: "🎁", name: "Gift a card" },
+};
+const EFFECT_ORDER = ["swap", "rotate", "skip", "tax", "purge", "bomb", "gift"];
+const EFFECT_SOUND = { swap: "whoosh", rotate: "whoosh", skip: "pop", tax: "deal", purge: "card", bomb: "drumroll", gift: "ding" };
+let slotBusyUntil = 0;          // renderGift waits for the reel to stop
+let slotTimers = [];
+
+function spinJoker(msg) {
+  const stage = document.getElementById("slot");
+  const reel = document.getElementById("slot-reel");
+  const result = document.getElementById("slot-result");
+  const window_ = stage.querySelector(".slot-window");
+  slotTimers.forEach(clearTimeout);
+  slotTimers = [];
+
+  document.getElementById("slot-who").textContent = msg.who || "Someone";
+  result.textContent = "";
+  result.classList.remove("show");
+  window_.classList.remove("landed");
+
+  const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const target = Math.max(0, EFFECT_ORDER.indexOf(msg.effect));
+  const LOOPS = 4;                                   // full passes before landing
+  const items = [];
+  for (let l = 0; l <= LOOPS; l++) {
+    for (const key of EFFECT_ORDER) {
+      const m = EFFECT_META[key] || { ic: "🃏", name: key };
+      items.push(`<div class="slot-item"><span class="ic">${m.ic}</span>${m.name}</div>`);
+    }
+  }
+  reel.innerHTML = items.join("");
+  const stop = (LOOPS * EFFECT_ORDER.length + target) * SLOT_H;
+
+  stage.classList.add("show");
+  reel.style.transition = "none";
+  reel.style.transform = "translateY(0)";
+  void reel.offsetHeight;                            // commit the reset before animating
+
+  const spin = reduced ? 0 : SLOT_SPIN_MS;
+  slotBusyUntil = Date.now() + spin + 900;
+  if (spin) {
+    reel.style.transition = `transform ${spin}ms cubic-bezier(.13,.79,.06,1)`;
+    // ticks that thin out as the reel slows, so it sounds like it's winding down
+    for (let i = 0; i < 16; i++) {
+      const t = Math.pow(i / 16, 2.1) * spin;
+      slotTimers.push(setTimeout(() => sfx.pop(), t));
+    }
+  }
+  reel.style.transform = `translateY(-${stop}px)`;
+
+  slotTimers.push(setTimeout(() => {
+    window_.classList.add("landed");
+    result.textContent = msg.text || msg.label || "";
+    result.classList.add("show");
+    sfx.shimmer();
+    const noise = EFFECT_SOUND[msg.effect];
+    if (noise && sfx[noise]) setTimeout(() => sfx[noise](), 180);
+    const c = centerOf(pileRect());
+    burstAt(c.x, c.y, {
+      count: 26, spread: 220, dur: 1.1,
+      colors: ["#ff5cc8", "#9b5cff", "#5ce1ff", "#ffe08a", "#fff"],
+    });
+    banner("🃏 " + msg.label, "cool");
+    setMood(msg.whoId, "smug", 2600);
+    setMoodOthers(msg.whoId, "shock", 2000);
+  }, spin + 20));
+
+  slotTimers.push(setTimeout(() => {
+    stage.classList.remove("show");
+    toast(msg.text, "", true);
+    renderGift();                                    // safe to show the picker now
+  }, spin + 900));
+}
+
 /* ============ Chaos: the gift picker ============
  * Shown only to the player the server is waiting on. Two taps: a card, then
  * who gets it. The server decides for you if you dawdle. */
@@ -1944,6 +2078,11 @@ let giftChoice = -1;
 function renderGift() {
   const overlay = document.getElementById("gift");
   const mine = view && view.giftFrom != null && view.giftFrom === view.youId;
+  // hold the picker back while the roulette is still spinning
+  if (mine && Date.now() < slotBusyUntil) {
+    overlay.classList.remove("show");
+    return;
+  }
   overlay.classList.toggle("show", !!mine);
   if (!mine) { giftChoice = -1; return; }
 
