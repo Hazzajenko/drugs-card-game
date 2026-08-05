@@ -237,6 +237,29 @@
   .seat-head { display: flex; align-items: center; gap: 7px; }
   .seat-head .zone-label { position: static; }
 
+  /* ---- post-game stats screen ---- */
+  #endgame-panel { max-width: 620px; max-height: 88vh; overflow-y: auto; gap: 12px; }
+  #end-awards { display: flex; flex-direction: column; gap: 4px; align-items: center; }
+  .award { font-size: .92rem; }
+  .award .who { color: #ffd54a; font-weight: 700; }
+  #end-players { display: flex; flex-direction: column; gap: 8px; width: 100%; }
+  .end-row {
+    display: flex; align-items: center; gap: 10px;
+    background: rgba(0,0,0,.28); border-radius: 12px; padding: 8px 12px;
+  }
+  .end-row.winner { box-shadow: inset 0 0 0 2px #ffd54a; }
+  .end-row .name { font-weight: 700; min-width: 90px; }
+  .end-row .name .sub { display: block; font-weight: 400; font-size: .72rem; opacity: .65; }
+  .end-row .numbers { flex: 1; font-size: .78rem; opacity: .85; line-height: 1.5; }
+  .end-facedown { display: flex; gap: 4px; align-items: center; }
+  .end-facedown .card { width: 34px; height: 48px; box-shadow: 0 1px 3px rgba(0,0,0,.5); }
+  .end-facedown .lbl { font-size: .64rem; opacity: .6; text-transform: uppercase; letter-spacing: 1px; margin-right: 2px; }
+  .end-facedown .none { font-size: .74rem; opacity: .5; font-style: italic; }
+  @media (max-width: 900px) {
+    .end-row { flex-wrap: wrap; }
+    .end-row .numbers { flex-basis: 100%; }
+  }
+
   /* ---- dressing room ---- */
   #av-preview { display: flex; justify-content: center; }
   #av-preview .avatar { width: 118px; height: 118px; }
@@ -759,7 +782,7 @@
   </div>
 </div>
 
-<span id="version-tag">v1.10.0</span>
+<span id="version-tag">v1.11.0</span>
 
 <!-- avatar dressing room -->
 <div id="dressup" class="overlay">
@@ -841,9 +864,13 @@
 
 <!-- game over -->
 <div id="overlay" class="overlay">
-  <h2 id="overlay-title"></h2>
-  <div style="display:flex; gap:12px;">
-    <button id="again-btn">Back to lobby</button>
+  <div class="panel" id="endgame-panel">
+    <h2 id="overlay-title"></h2>
+    <div id="end-awards"></div>
+    <div id="end-players"></div>
+    <div style="display:flex; gap:12px;">
+      <button id="again-btn">Back to lobby</button>
+    </div>
   </div>
 </div>
 
@@ -1756,6 +1783,7 @@ function connect() {
         banner(iWon ? "You win!" : msg.winner + " wins!", "win");
         setMood(msg.winnerId, "happy", 12000);
         setMoodOthers(msg.winnerId, "sad", 12000);
+        renderEndScreen(msg);
         toast(fill(pick(LINES.win), { who: msg.winner }), iWon ? "good" : "", true);
         if (iWon) {
           sfx.fanfare();
@@ -1795,6 +1823,105 @@ function connect() {
 function myName() {
   const me = view && view.players.find(p => p.id === view.youId);
   return me ? me.name : "";
+}
+
+/* ============ Post-game stats screen ============ */
+function endDur(ms) {
+  if (ms == null) return "";
+  const s = Math.round(ms / 1000);
+  return s >= 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s}s`;
+}
+/* Superlatives: each looks for a strict maximum (ties award nobody) so every
+ * line names exactly one player. Order = priority; at most 5 shown. */
+const AWARDS = [
+  { icon: "🧹", title: "Human vacuum",  stat: s => s.biggestPickup, line: (w, n) => `picked up ${n} cards at once` },
+  { icon: "💥", title: "Pyromaniac",    stat: s => s.burns,         line: (w, n) => `killed the pile ${n === 1 ? "once" : n + " times"}` },
+  { icon: "🍀", title: "Blind luck",    stat: s => s.blindFail === 0 ? s.blindOk : 0, line: (w, n) => `${n} blind flip${n === 1 ? "" : "s"}, never busted` },
+  { icon: "🙈", title: "Butterfingers", stat: s => s.blindFail,     line: (w, n) => `busted ${n} blind flip${n === 1 ? "" : "s"}` },
+  { icon: "🃏", title: "Card machine",  stat: s => s.played,        line: (w, n) => `played ${n} cards` },
+  { icon: "🔁", title: "Menace",        stat: s => s.jacks,         line: (w, n) => `reversed play ${n === 1 ? "once" : n + " times"}` },
+];
+function computeAwards(summary) {
+  const rows = summary.filter(p => p.stats);
+  const out = [];
+  for (const a of AWARDS) {
+    let best = null, bestN = 0, tied = false;
+    for (const p of rows) {
+      const n = a.stat(p.stats);
+      if (n > bestN) { best = p; bestN = n; tied = false; }
+      else if (n === bestN && n > 0) tied = true;
+    }
+    if (best && !tied && bestN > 0) out.push({ ...a, who: best.name, n: bestN });
+    if (out.length >= 5) break;
+  }
+  return out;
+}
+function renderEndScreen(msg) {
+  const awards = document.getElementById("end-awards");
+  awards.innerHTML = "";
+  const totalPlayed = (msg.summary || []).reduce((t, p) => t + (p.stats ? p.stats.played : 0), 0);
+  if (msg.durationMs != null) {
+    const head = document.createElement("div");
+    head.className = "award";
+    head.style.opacity = ".7";
+    head.textContent = `⏱ ${endDur(msg.durationMs)} · ${totalPlayed} cards played`;
+    awards.appendChild(head);
+  }
+  for (const a of computeAwards(msg.summary || [])) {
+    const d = document.createElement("div");
+    d.className = "award";
+    d.innerHTML = `${a.icon} <b>${a.title}</b> — <span class="who"></span> ${a.line(a.who, a.n)}`;
+    d.querySelector(".who").textContent = a.who;
+    awards.appendChild(d);
+  }
+
+  const list = document.getElementById("end-players");
+  list.innerHTML = "";
+  const order = [...(msg.summary || [])].sort((x, y) => (y.won - x.won) || (x.cardsLeft - y.cardsLeft));
+  for (const p of order) {
+    const row = document.createElement("div");
+    row.className = "end-row" + (p.won ? " winner" : "");
+    row.appendChild(avatarEl(p.avatar, { expr: p.won ? "happy" : "sad" }));
+
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = `${p.won ? "🏆 " : ""}${p.name}${p.bot ? " 🤖" : ""}`;
+    const sub = document.createElement("span");
+    sub.className = "sub";
+    sub.textContent = p.won ? "winner" : `${p.cardsLeft} card${p.cardsLeft === 1 ? "" : "s"} left`;
+    name.appendChild(sub);
+    row.appendChild(name);
+
+    const nums = document.createElement("span");
+    nums.className = "numbers";
+    if (p.stats) {
+      const s = p.stats;
+      const bits = [`played ${s.played}`];
+      bits.push(s.pickups ? `picked up ${s.pickedUp} (worst ${s.biggestPickup})` : "never picked up 🧊");
+      if (s.burns) bits.push(`piles killed ${s.burns}`);
+      if (s.blindOk + s.blindFail) bits.push(`blind flips ${s.blindOk}/${s.blindOk + s.blindFail}`);
+      nums.textContent = bits.join(" · ");
+    }
+    row.appendChild(nums);
+
+    // the cards fate never made them flip
+    const fd = document.createElement("div");
+    fd.className = "end-facedown";
+    const lbl = document.createElement("span");
+    lbl.className = "lbl";
+    lbl.textContent = "face-down";
+    fd.appendChild(lbl);
+    if (p.faceDown && p.faceDown.length) {
+      for (const c of p.faceDown) fd.appendChild(cardEl(c, true));
+    } else {
+      const none = document.createElement("span");
+      none.className = "none";
+      none.textContent = "all flipped";
+      fd.appendChild(none);
+    }
+    row.appendChild(fd);
+    list.appendChild(row);
+  }
 }
 function createRoom() {
   const name = document.getElementById("name-input").value.trim();

@@ -441,6 +441,8 @@ function sortHand(p) { p.hand.sort((a, b) => a.rank - b.rank); }
 
 function resolvePlay(room, cards, actor) {
   const blind = !!(actor && actor._blind);
+  // per-game scoreboard (absent in bare unit-test rooms)
+  const gs = actor && room.gs ? room.gs[actor.id] : null;
   for (const c of cards) room.pile.push(c);
   // Jacks flip the turn order. Any number played together reverses ONCE, so a
   // pair still reverses rather than cancelling itself out.
@@ -448,6 +450,10 @@ function resolvePlay(room, cards, actor) {
   if (reversed) { room.direction *= -1; bump("reversals"); }
   bump("cardsPlayed", cards.length);
   for (const c of cards) bumpMap("byRank", c.rank);
+  if (gs) {
+    gs.played += cards.length;
+    if (reversed) gs.jacks++;
+  }
 
   if (actor && !blind) {
     fx(room, "play", { whoId: actor.id, who: actor.name, cards });
@@ -473,6 +479,7 @@ function resolvePlay(room, cards, actor) {
 
   if (burned) {
     bump("pilesBurned");
+    if (gs) { gs.burns++; if (overdose) gs.overdoses++; }
     fx(room, "burn", {
       who: actor ? actor.name : "Someone",
       whoId: actor ? actor.id : null,
@@ -508,6 +515,12 @@ function pickUpPile(room, p) {
   const n = room.pile.length;
   bump("pilePickups");
   bump("cardsPickedUp", n);
+  const gs = room.gs && room.gs[p.id];
+  if (gs) {
+    gs.pickups++;
+    gs.pickedUp += n;
+    if (n > gs.biggestPickup) gs.biggestPickup = n;
+  }
   fx(room, "pickup", { whoId: p.id, who: p.name, n });
   p.hand.push(...room.pile);
   room.pile = [];
@@ -746,6 +759,12 @@ function startGame(room) {
   }
   room.turn = Math.floor(Math.random() * room.players.length);
   room.gameStartedAt = Date.now();
+  // per-player scoreboard for the post-game screen; separate from the global
+  // all-time stats, and thrown away with the room
+  room.gs = {};
+  for (const p of room.players) {
+    room.gs[p.id] = { played: 0, pickups: 0, pickedUp: 0, biggestPickup: 0, burns: 0, overdoses: 0, jacks: 0, blindOk: 0, blindFail: 0 };
+  }
   bump("gamesStarted");
   logMsg(room, `Game started: ${room.players.length} players, ${room.opts.decks} deck(s), Overdose ${room.opts.burn || "off"}. ${room.players[room.turn].name} goes first.`);
   pushState(room);
@@ -794,7 +813,24 @@ function endGame(room, winner) {
   bumpMap("wins", winner.name);
   setImmediate(checkDrainDone);
   logMsg(room, `${winner.name} wins!`);
-  broadcast(room, { t: "gameover", winner: winner.name, winnerId: winner.id });
+  broadcast(room, {
+    t: "gameover",
+    winner: winner.name,
+    winnerId: winner.id,
+    durationMs: room.gameStartedAt ? Date.now() - room.gameStartedAt : null,
+    // The game is over, so the secrets can come out: everyone's unflipped
+    // face-down cards are revealed, plus each player's per-game scoreboard.
+    summary: room.players.map(p => ({
+      id: p.id,
+      name: p.name,
+      bot: p.bot,
+      avatar: p.avatar || null,
+      won: p.id === winner.id,
+      cardsLeft: p.hand.length + p.faceUp.length + p.faceDown.length,
+      faceDown: p.faceDown,
+      stats: (room.gs && room.gs[p.id]) || null,
+    })),
+  });
   pushState(room);
 }
 
@@ -804,6 +840,8 @@ function flipFaceDown(room, p, idx) {
   const ok = canPlayRank(room, card.rank);
   bump("blindFlips");
   if (!ok) bump("blindFails");
+  const gsFlip = room.gs && room.gs[p.id];
+  if (gsFlip) { if (ok) gsFlip.blindOk++; else gsFlip.blindFail++; }
   room.busy = true;
   pushState(room, { card, ok, who: p.name, whoId: p.id });
   clearTimeout(room.timer);
